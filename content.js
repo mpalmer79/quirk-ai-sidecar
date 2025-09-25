@@ -1,107 +1,120 @@
-// content.js
-(() => {
-  console.log("Quirk Sidecar content script on", location.href);
+// Avoid double-injection if the page reloads or MV3 reinjects.
+if (!window.__quirkSidecarInstalled) {
+  window.__quirkSidecarInstalled = true;
+  console.log("Quirk Sidecar content script on:", location.href);
 
-  let rootEl, shadow, textarea;
+  const PANEL_HOST_ID = "quirk-sidecar-root";
 
-  function ensurePanel() {
-    if (rootEl) return;
+  function createPanel() {
+    // Host container so we can remove everything cleanly
+    const host = document.createElement("div");
+    host.id = PANEL_HOST_ID;
+    host.style.all = "initial"; // minimize inherited styles
+    host.style.position = "fixed";
+    host.style.zIndex = "2147483647"; // top-most
+    host.style.right = "16px";
+    host.style.bottom = "16px";
+    host.style.width = "360px";
+    host.style.maxWidth = "90vw";
+    host.style.fontFamily = "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
 
-    rootEl = document.createElement('div');
-    rootEl.id = 'quirk-root';
-    Object.assign(rootEl.style, {
-      position: 'fixed',
-      right: '16px',
-      bottom: '16px',
-      zIndex: '2147483647',
-      display: 'none',
-      width: '360px',
-      height: '260px',
-    });
-    document.documentElement.appendChild(rootEl);
+    // Shadow root to isolate styles from the CRM app
+    const shadow = host.attachShadow({ mode: "open" });
 
-    shadow = rootEl.attachShadow({ mode: 'open' });
+    // Panel UI
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = `
+      <style>
+        :host { all: initial; }
 
-    const style = document.createElement('style');
-    style.textContent = `
-      :host { all: initial; }
-      .card {
-        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-        background: #fff;
-        border: 1px solid #e5e7eb;
-        border-radius: 12px;
-        width: 100%; height: 100%;
-        box-shadow: 0 12px 24px rgba(0,0,0,.18);
-        display: grid;
-        grid-template-rows: 40px 1fr 44px;
-        overflow: hidden;
-      }
-      .hdr {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 0 12px; font-weight: 700; color: #0b6e37; border-bottom: 1px solid #eef2f7;
-      }
-      .hdr button {
-        border: 0; background: transparent; font-size: 18px; cursor: pointer;
-      }
-      textarea {
-        width: 100%; height: 100%; border: 0; resize: none; padding: 10px 12px; outline: none;
-        font: inherit; color: #0f172a;
-      }
-      .row {
-        display: flex; gap: 8px; padding: 8px; border-top: 1px solid #eef2f7; justify-content: flex-end;
-      }
-      .btn {
-        border: 1px solid #d1d5db; background: #fff; border-radius: 8px; padding: 8px 12px; cursor: pointer; font-weight: 600;
-      }
-      .btn.primary {
-        color: #fff; background: #0b6e37; border-color: #0b6e37;
-      }
-    `;
-    shadow.append(style);
+        .card {
+          box-sizing: border-box;
+          background: #fff;
+          color: #0f172a;
+          border: 1px solid #e5e7eb;
+          border-radius: 12px;
+          box-shadow: 0 10px 24px rgba(0,0,0,.12);
+          overflow: hidden;
+        }
 
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `
-      <div class="hdr">Quirk Sidecar <button id="close" aria-label="Close">×</button></div>
-      <textarea id="ta" placeholder="Notes…"></textarea>
-      <div class="row">
-        <button id="copy" class="btn">Copy</button>
-        <button id="hide" class="btn">Hide</button>
-        <button id="save" class="btn primary">Save (stub)</button>
+        .hdr {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 12px;
+          font-weight: 700;
+          background: #0b6e37;
+          color: #fff;
+        }
+
+        .body {
+          padding: 12px;
+          line-height: 1.35;
+          font-size: 14px;
+        }
+
+        .close {
+          appearance: none;
+          border: 0;
+          background: transparent;
+          color: #fff;
+          font-size: 18px;
+          line-height: 1;
+          cursor: pointer;
+        }
+
+        .row + .row { margin-top: 8px; }
+
+        .muted { color: #475569; font-weight: 500; }
+        .kbd {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+          background:#f1f5f9; border:1px solid #e2e8f0; border-radius:6px; padding:2px 6px;
+        }
+      </style>
+
+      <div class="card">
+        <div class="hdr">
+          <div>Quirk AI Sidecar</div>
+          <button class="close" title="Close panel" aria-label="Close">×</button>
+        </div>
+        <div class="body">
+          <div class="row">Hello! Your sidecar is active on this page.</div>
+          <div class="row muted">Use <span class="kbd">Alt</span>+<span class="kbd">Q</span> to toggle this panel.</div>
+        </div>
       </div>
     `;
-    shadow.append(card);
 
-    textarea = card.querySelector('#ta');
+    // Wire up close
+    wrapper.querySelector(".close").addEventListener("click", removePanel);
 
-    shadow.getElementById = id => shadow.querySelector('#' + id);
-    shadow.getElementById('close').addEventListener('click', hide);
-    shadow.getElementById('hide').addEventListener('click', hide);
-    shadow.getElementById('copy').addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(textarea.value || ''); } catch {}
-    });
-    shadow.getElementById('save').addEventListener('click', async () => {
-      // Placeholder: later we’ll post to Sheets/LLM/your API via the service worker.
-      console.log('[Quirk] Save clicked with text:', textarea.value);
-    });
+    shadow.appendChild(wrapper);
+    document.documentElement.appendChild(host);
   }
 
-  function show(text) {
-    ensurePanel();
-    if (typeof text === 'string' && text.trim()) textarea.value = text;
-    rootEl.style.display = 'block';
-    setTimeout(() => textarea?.focus(), 0);
+  function panelExists() {
+    return document.getElementById(PANEL_HOST_ID) != null;
   }
 
-  function hide() {
-    if (rootEl) rootEl.style.display = 'none';
+  function removePanel() {
+    const host = document.getElementById(PANEL_HOST_ID);
+    if (host && host.parentNode) host.parentNode.removeChild(host);
   }
 
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (!msg || typeof msg !== 'object') return;
-    if (msg.type === 'toggle-panel') {
-      if (!rootEl || rootEl.style.display === 'none') show(); else hide();
+  function togglePanel() {
+    if (panelExists()) {
+      removePanel();
+    } else {
+      createPanel();
     }
-    if (msg.type === 'open-with-selection') show(msg.text || '');
+  }
+
+  // Listen for the command from background.js
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg && msg.type === "TOGGLE_QUIRK_PANEL") {
+      togglePanel();
+      sendResponse?.({ ok: true });
+    }
+    // Returning false – we respond synchronously
+    return false;
   });
-})();
+}
