@@ -21,13 +21,14 @@
         "https://vinsolutions.app.coxautoinc.com/*"
       ],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "commands": {
     "open-quirk-panel": {
-      "suggested_key": { "default": "Alt+Q", "mac": "Command+Shift+Q" },
-      "description": "Open Quirk panel"
+      "suggested_key": { "default": "Alt+Q" },
+      "description": "Toggle Quirk panel"
     }
   }
 }
