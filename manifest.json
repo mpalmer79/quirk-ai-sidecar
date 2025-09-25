@@ -3,18 +3,31 @@
   "name": "Quirk AI Sidecar",
   "version": "0.1.0",
   "description": "Helper tools for VIN Solutions.",
-  "permissions": ["activeTab", "scripting", "storage", "contextMenus"],
-  "host_permissions": ["https://*.vinsolutions.com/*"],
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "https://*.vinsolutions.com/*",
+    "https://vinsolutions.app.coxautoinc.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_title": "Quirk AI Sidecar"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.vinsolutions.com/*",
+        "https://vinsolutions.app.coxautoinc.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "commands": {
-    "toggle-quirk-panel": {
-      "suggested_key": { "default": "Alt+Q" },
-      "description": "Toggle Quirk panel"
+    "open-quirk-panel": {
+      "suggested_key": { "default": "Alt+Q", "mac": "Command+Shift+Q" },
+      "description": "Open Quirk panel"
     }
   }
 }
