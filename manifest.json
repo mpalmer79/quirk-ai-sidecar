@@ -3,12 +3,18 @@
   "name": "Quirk AI Sidecar",
   "version": "0.1.0",
   "description": "Helper tools for VIN Solutions.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "scripting", "storage", "contextMenus"],
   "host_permissions": ["https://*.vinsolutions.com/*"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_title": "Quirk AI Sidecar"
+  },
+  "commands": {
+    "toggle-quirk-panel": {
+      "suggested_key": { "default": "Alt+Q" },
+      "description": "Toggle Quirk panel"
+    }
   }
 }
