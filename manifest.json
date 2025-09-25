@@ -1,1 +1,29 @@
-
+{
+  "manifest_version": 3,
+  "name": "Quirk AI Sidecar (VinSolutions)",
+  "version": "0.1.0",
+  "description": "Read-only helper panel that summarizes a lead and drafts responses for VinSolutions CRM pages.",
+  "permissions": ["activeTab", "storage", "clipboardWrite"],
+  "host_permissions": [
+    "https://*.vinsolutions.com/*",
+    "https://vinsolutions.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.vinsolutions.com/*",
+        "https://vinsolutions.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "Quirk AI Sidecar"
+  }
+}
