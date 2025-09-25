@@ -1,28 +1,24 @@
-// background.js (service worker)
 chrome.runtime.onInstalled.addListener(() => {
-  // Right-click menu for selected text
-  chrome.contextMenus.create({
-    id: 'quirk-open',
-    title: 'Send to Quirk panel',
-    contexts: ['selection'],
-  });
+  console.log("Quirk Sidecar installed");
 });
 
-// Open/Toggle panel when the toolbar icon is clicked
-chrome.action.onClicked.addListener((tab) => {
-  if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'toggle-panel' });
-});
+// Keyboard shortcut -> inject (if needed) + tell the page to toggle the panel
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== "open-quirk-panel") return;
 
-// Context-menu -> send selection into panel
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === 'quirk-open' && tab?.id) {
-    chrome.tabs.sendMessage(tab.id, { type: 'open-with-selection', text: info.selectionText || '' });
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+
+  // Attempt to inject content.js (no-op if already present or not permitted)
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["content.js"]
+    });
+  } catch (e) {
+    // Ignore if already injected / host not permitted
+    console.debug("Inject attempt:", e?.message || e);
   }
-});
 
-// Keyboard shortcut (Alt+Q by default)
-chrome.commands.onCommand.addListener((command, tab) => {
-  if (command === 'toggle-quirk-panel' && tab?.id) {
-    chrome.tabs.sendMessage(tab.id, { type: 'toggle-panel' });
-  }
+  chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_QUIRK_PANEL" });
 });
