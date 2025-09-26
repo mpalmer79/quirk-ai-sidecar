@@ -1,76 +1,119 @@
 // content.js
 (() => {
-  let open = false;
-  let panel = null;
+  // Prevent double injection if Chrome re-runs the script
+  if (window.__quirkSidecarContentLoaded) return;
+  window.__quirkSidecarContentLoaded = true;
 
-  function ensurePanel() {
-    if (panel) return panel;
+  const LOG = "[Quirk Sidecar]";
+  console.log(`${LOG} content script loaded:`, location.href);
 
-    panel = document.createElement("div");
-    panel.style.cssText = `
-      position:fixed; top:20px; right:20px; z-index:2147483647;
-      width:380px; background:#111; color:#fff; padding:12px;
-      border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4);
-      font:14px/1.4 system-ui; display:none;
-    `;
-    panel.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
-        <strong>Quirk Sidecar</strong>
-        <button id="q-close" style="background:#444;color:#fff;border:0;padding:4px 8px;border-radius:8px;cursor:pointer">×</button>
+  // ---------- tiny style helper ----------
+  const style = (el, obj) => (Object.assign(el.style, obj), el);
+
+  // ---------- panel builders ----------
+  function buildPanel() {
+    const panel = document.createElement("div");
+    panel.id = "quirk-sidecar";
+
+    style(panel, {
+      position: "fixed",
+      top: "0",
+      right: "0",
+      width: "360px",
+      height: "100vh",
+      background: "#ffffff",
+      borderLeft: "1px solid #e5e7eb",
+      boxShadow: "rgba(0,0,0,.18) -8px 0 20px",
+      zIndex: "2147483647",
+      fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+      display: "flex",
+      flexDirection: "column"
+    });
+
+    const bar = document.createElement("div");
+    bar.id = "quirk-sidecar-bar";
+    bar.innerHTML = `<strong>Quirk Sidecar</strong>`;
+    style(bar, {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: "8px",
+      padding: "10px 12px",
+      background: "#0f766e", // teal-700
+      color: "#fff",
+      fontWeight: "700",
+      letterSpacing: ".2px"
+    });
+
+    const close = document.createElement("button");
+    close.id = "quirk-sidecar-close";
+    close.type = "button";
+    close.title = "Close";
+    close.textContent = "✕";
+    style(close, {
+      border: "none",
+      background: "transparent",
+      color: "#fff",
+      fontSize: "18px",
+      lineHeight: "1",
+      cursor: "pointer",
+      padding: "2px 4px"
+    });
+    close.addEventListener("click", removePanel);
+    bar.appendChild(close);
+
+    const body = document.createElement("div");
+    body.id = "quirk-sidecar-body";
+    style(body, {
+      padding: "12px",
+      overflow: "auto",
+      flex: "1"
+    });
+    body.innerHTML = `
+      <div style="font-size:14px; color:#0f172a; line-height:1.5">
+        <p><strong>Welcome!</strong> Use <code>Alt+Q</code> or the toolbar icon to toggle this panel.</p>
+        <p style="margin-top:8px; color:#334155">
+          This is the injected Sidecar UI. You can wire this up to your FastAPI service at <code>http://127.0.0.1:8765</code>
+          when you’re ready.
+        </p>
       </div>
-
-      <textarea id="q-note" style="width:100%;height:120px;border-radius:8px;border:1px solid #333;background:#222;color:#fff;padding:8px"></textarea>
-
-      <div style="margin-top:8px;display:flex; gap:8px;align-items:center">
-        <button id="q-sum" style="background:#0ea5e9;border:0;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer">
-          Summarize
-        </button>
-        <span id="q-status" style="opacity:.8"></span>
-      </div>
-
-      <pre id="q-out" style="margin-top:8px;white-space:pre-wrap;background:#1f2937;padding:8px;border-radius:8px;max-height:200px;overflow:auto"></pre>
     `;
+
+    panel.append(bar, body);
     document.body.appendChild(panel);
-
-    panel.querySelector("#q-close").onclick = () => toggle(false);
-
-    panel.querySelector("#q-sum").onclick = () => {
-      const text =
-        panel.querySelector("#q-note").value || window.getSelection().toString();
-      const status = panel.querySelector("#q-status");
-      const out = panel.querySelector("#q-out");
-
-      status.textContent = "Calling /summarize…";
-
-      chrome.runtime.sendMessage({ type: "summarize", note: text }, (resp) => {
-        if (!resp?.ok) {
-          status.textContent = "Error";
-          out.textContent = resp?.error || "Unknown error";
-          return;
-        }
-        status.textContent = "Done";
-        out.textContent = resp.data?.summary ?? JSON.stringify(resp.data);
-      });
-    };
-
     return panel;
   }
 
-  function toggle(force) {
-    open = typeof force === "boolean" ? force : !open;
-    const p = ensurePanel();
-    p.style.display = open ? "block" : "none";
-    if (open) {
-      // Pre-fill with current selection if there is one
-      const sel = window.getSelection()?.toString?.() || "";
-      p.querySelector("#q-note").value = sel;
-    }
-  }
+  function getPanel() { return document.getElementById("quirk-sidecar"); }
+  function ensurePanel() { return getPanel() || buildPanel(); }
+  function removePanel() { getPanel()?.remove(); }
+  function togglePanel() { getPanel() ? removePanel() : ensurePanel(); }
 
-  // Receive Alt+Q command from background
+  // ---------- messaging from background (toolbar + chrome.commands) ----------
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.type === "toggle-panel") toggle();
+    if (msg?.type === "toggle") togglePanel();
   });
 
-  console.log("Quirk Sidecar content loaded");
+  // ---------- keyboard fallback (in case shortcut isn't bound) ----------
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      // Alt+Q (Windows) / Option+Q (Mac). We also allow Meta+Q as a fallback.
+      const key = String(e.key || "").toLowerCase();
+      const altQ = e.altKey && key === "q";
+      const metaQ = e.metaKey && key === "q";
+      if (altQ || metaQ) {
+        e.preventDefault();
+        togglePanel();
+      }
+    },
+    true
+  );
+
+  // ---------- expose small debug API so you can test from DevTools ----------
+  window.quirkSidecar = {
+    open: ensurePanel,
+    close: removePanel,
+    toggle: togglePanel
+  };
 })();
