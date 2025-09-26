@@ -1,120 +1,76 @@
-// Avoid double-injection if the page reloads or MV3 reinjects.
-if (!window.__quirkSidecarInstalled) {
-  window.__quirkSidecarInstalled = true;
-  console.log("Quirk Sidecar content script on:", location.href);
+// content.js
+(() => {
+  let open = false;
+  let panel = null;
 
-  const PANEL_HOST_ID = "quirk-sidecar-root";
+  function ensurePanel() {
+    if (panel) return panel;
 
-  function createPanel() {
-    // Host container so we can remove everything cleanly
-    const host = document.createElement("div");
-    host.id = PANEL_HOST_ID;
-    host.style.all = "initial"; // minimize inherited styles
-    host.style.position = "fixed";
-    host.style.zIndex = "2147483647"; // top-most
-    host.style.right = "16px";
-    host.style.bottom = "16px";
-    host.style.width = "360px";
-    host.style.maxWidth = "90vw";
-    host.style.fontFamily = "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-
-    // Shadow root to isolate styles from the CRM app
-    const shadow = host.attachShadow({ mode: "open" });
-
-    // Panel UI
-    const wrapper = document.createElement("div");
-    wrapper.innerHTML = `
-      <style>
-        :host { all: initial; }
-
-        .card {
-          box-sizing: border-box;
-          background: #fff;
-          color: #0f172a;
-          border: 1px solid #e5e7eb;
-          border-radius: 12px;
-          box-shadow: 0 10px 24px rgba(0,0,0,.12);
-          overflow: hidden;
-        }
-
-        .hdr {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 10px 12px;
-          font-weight: 700;
-          background: #0b6e37;
-          color: #fff;
-        }
-
-        .body {
-          padding: 12px;
-          line-height: 1.35;
-          font-size: 14px;
-        }
-
-        .close {
-          appearance: none;
-          border: 0;
-          background: transparent;
-          color: #fff;
-          font-size: 18px;
-          line-height: 1;
-          cursor: pointer;
-        }
-
-        .row + .row { margin-top: 8px; }
-
-        .muted { color: #475569; font-weight: 500; }
-        .kbd {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-          background:#f1f5f9; border:1px solid #e2e8f0; border-radius:6px; padding:2px 6px;
-        }
-      </style>
-
-      <div class="card">
-        <div class="hdr">
-          <div>Quirk AI Sidecar</div>
-          <button class="close" title="Close panel" aria-label="Close">×</button>
-        </div>
-        <div class="body">
-          <div class="row">Hello! Your sidecar is active on this page.</div>
-          <div class="row muted">Use <span class="kbd">Alt</span>+<span class="kbd">Q</span> to toggle this panel.</div>
-        </div>
-      </div>
+    panel = document.createElement("div");
+    panel.style.cssText = `
+      position:fixed; top:20px; right:20px; z-index:2147483647;
+      width:380px; background:#111; color:#fff; padding:12px;
+      border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4);
+      font:14px/1.4 system-ui; display:none;
     `;
+    panel.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+        <strong>Quirk Sidecar</strong>
+        <button id="q-close" style="background:#444;color:#fff;border:0;padding:4px 8px;border-radius:8px;cursor:pointer">×</button>
+      </div>
 
-    // Wire up close
-    wrapper.querySelector(".close").addEventListener("click", removePanel);
+      <textarea id="q-note" style="width:100%;height:120px;border-radius:8px;border:1px solid #333;background:#222;color:#fff;padding:8px"></textarea>
 
-    shadow.appendChild(wrapper);
-    document.documentElement.appendChild(host);
+      <div style="margin-top:8px;display:flex; gap:8px;align-items:center">
+        <button id="q-sum" style="background:#0ea5e9;border:0;color:#fff;padding:8px 10px;border-radius:8px;cursor:pointer">
+          Summarize
+        </button>
+        <span id="q-status" style="opacity:.8"></span>
+      </div>
+
+      <pre id="q-out" style="margin-top:8px;white-space:pre-wrap;background:#1f2937;padding:8px;border-radius:8px;max-height:200px;overflow:auto"></pre>
+    `;
+    document.body.appendChild(panel);
+
+    panel.querySelector("#q-close").onclick = () => toggle(false);
+
+    panel.querySelector("#q-sum").onclick = () => {
+      const text =
+        panel.querySelector("#q-note").value || window.getSelection().toString();
+      const status = panel.querySelector("#q-status");
+      const out = panel.querySelector("#q-out");
+
+      status.textContent = "Calling /summarize…";
+
+      chrome.runtime.sendMessage({ type: "summarize", note: text }, (resp) => {
+        if (!resp?.ok) {
+          status.textContent = "Error";
+          out.textContent = resp?.error || "Unknown error";
+          return;
+        }
+        status.textContent = "Done";
+        out.textContent = resp.data?.summary ?? JSON.stringify(resp.data);
+      });
+    };
+
+    return panel;
   }
 
-  function panelExists() {
-    return document.getElementById(PANEL_HOST_ID) != null;
-  }
-
-  function removePanel() {
-    const host = document.getElementById(PANEL_HOST_ID);
-    if (host && host.parentNode) host.parentNode.removeChild(host);
-  }
-
-  function togglePanel() {
-    if (panelExists()) {
-      removePanel();
-    } else {
-      createPanel();
+  function toggle(force) {
+    open = typeof force === "boolean" ? force : !open;
+    const p = ensurePanel();
+    p.style.display = open ? "block" : "none";
+    if (open) {
+      // Pre-fill with current selection if there is one
+      const sel = window.getSelection()?.toString?.() || "";
+      p.querySelector("#q-note").value = sel;
     }
   }
 
-  // Listen for the command from background.js
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg && msg.type === "TOGGLE_QUIRK_PANEL") {
-      togglePanel();
-      sendResponse?.({ ok: true });
-    }
-    // Returning false – we respond synchronously
-    return false;
+  // Receive Alt+Q command from background
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === "toggle-panel") toggle();
   });
-}
+
+  console.log("Quirk Sidecar content loaded");
+})();
