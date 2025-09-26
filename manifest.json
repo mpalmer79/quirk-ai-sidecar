@@ -1,29 +1,29 @@
-{
+﻿{
   "manifest_version": 3,
   "name": "Quirk AI Sidecar",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Helper tools for VIN Solutions.",
-  "permissions": ["activeTab", "scripting", "storage"],
-  "host_permissions": [
-    "https://*.vinsolutions.com/*",
-    "https://vinsolutions.app.coxautoinc.com/*",
-    "http://127.0.0.1:8765/*"
-  ],
   "icons": {
     "16": "icons/16.png",
     "32": "icons/32.png",
     "48": "icons/48.png",
     "128": "icons/128.png"
   },
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "https://vinsolutions.app.coxautoinc.com/*",
+    "https://*.vinsolutions.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_title": "Quirk AI Sidecar",
     "default_icon": {
       "16": "icons/16.png",
-      "32": "icons/32.png",
-      "48": "icons/48.png"
+      "32": "icons/32.png"
     }
   },
   "commands": {
@@ -34,9 +34,20 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://vinsolutions.app.coxautoinc.com/vinconnect/*"],
+      "matches": [
+        "https://vinsolutions.app.coxautoinc.com/*",
+        "https://*.vinsolutions.com/*"
+      ],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*.png"],
+      "matches": ["<all_urls>"]
     }
   ]
 }
