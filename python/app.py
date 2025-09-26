@@ -51,3 +51,9 @@ def ingest_dashboard(data: DashboardPayload):
     # TODO: write to CSV, SQLite, or a file per dealer
     # with open("dashboard_log.jsonl","a",encoding="utf-8") as f: f.write(data.model_dump_json() + "\n")
     return {"status": "ok"}
+from fastapi.responses import Response
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    # return an empty 204 instead of a 404
+    return Response(status_code=204)
