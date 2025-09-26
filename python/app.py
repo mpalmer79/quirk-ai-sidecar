@@ -57,3 +57,20 @@ from fastapi.responses import Response
 def favicon():
     # return an empty 204 instead of a 404
     return Response(status_code=204)
+import logging
+from starlette.middleware.base import BaseHTTPMiddleware
+
+logger = logging.getLogger("uvicorn.error")
+
+async def _log_request(request, call_next):
+    try:
+        if request.method in {"POST", "PUT", "PATCH"}:
+            body = await request.body()
+            logger.info(f"{request.method} {request.url.path} body={body.decode('utf-8','ignore')}")
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        logger.exception("Request failed")
+        raise
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=_log_request)
