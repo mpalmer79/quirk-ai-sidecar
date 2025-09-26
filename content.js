@@ -2,86 +2,105 @@
 
 /* ---------- small utils ---------- */
 const $all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-const text = el => (el?.textContent || "").trim();
-const toInt = v => {
+const $one = (sel, root = document) => root.querySelector(sel);
+const text = (el) => (el?.textContent || "").trim();
+const toInt = (v) => {
   const m = String(v ?? "").replace(/[, ]/g, "").match(/-?\d+/);
   return m ? parseInt(m[0], 10) : null;
 };
-const byHeading = (needle) => {
-  const hay = needle.toLowerCase();
-  // try common heading tags first
+
+/* ---------- locate a card by its heading text ---------- */
+function byHeading(needle) {
+  const hay = String(needle).toLowerCase();
   for (const h of $all("h1,h2,h3,h4,h5,h6,.card-title,.panel-title,header,legend,section > .title")) {
     if (text(h).toLowerCase().includes(hay)) {
-      // climb to a reasonable container/card
       return h.closest(".card,.panel,.mat-card,section,article,div") || h.parentElement;
     }
   }
-  // fallback: any node that contains the phrase
+  // fallback – find any element containing the text
   for (const n of $all("div,section,article")) {
-    if (text(n).toLowerCase().includes(hay) && n.querySelector("*")) return n;
+    if (text(n).toLowerCase().includes(hay)) return n;
   }
   return null;
-};
+}
 
-/* ---------- scraping ---------- */
+/* ---------- scrapeers (VinSolutions dashboard) ---------- */
 function scrapeSalesFunnel() {
   const card = byHeading("Sales Funnel");
-  if (!card) return null;
-  // Robust fallback: grab the first 5 integers in the card’s text
-  const nums = (text(card).match(/\d+/g) || []).map(n => parseInt(n, 10));
-  const [customers, contacted, apptsSet, apptsShown, sold] = nums;
-  return { customers, contacted, apptsSet, apptsShown, sold };
+  if (!card) return {};
+  const rows = $all("div,li,span", card).map((n) => text(n)).filter(Boolean);
+  // Pull first 5 integers in order that commonly appear: Customers, Contacted, Appts Set, Appts Shown, Sold
+  const ints = rows.map(toInt).filter((n) => Number.isInteger(n));
+  return {
+    customers: ints[0] ?? null,
+    contacted: ints[1] ?? null,
+    apptsSet: ints[2] ?? null,
+    apptsShown: ints[3] ?? null,
+    sold: ints[4] ?? null
+  };
 }
 
 function scrapeKPIs() {
   const card = byHeading("Key Performance Indicators");
-  if (!card) return null;
-  const nums = (text(card).match(/\d+/g) || []).map(n => parseInt(n, 10));
-  // order on your screen: Unanswered, Open Visits, Buying Signals, Pending Deals
-  const [unansweredComms, openVisits, buyingSignals, pendingDeals] = nums;
-  return { unansweredComms, openVisits, buyingSignals, pendingDeals };
+  if (!card) return {};
+  const labels = ["Unanswered Comms", "Open Visits", "Buying Signals", "Pending Deals"];
+  const out = {};
+  for (const label of labels) {
+    const node = $all("*", card).find((n) => text(n).toLowerCase() === label.toLowerCase());
+    if (node) {
+      // Value is usually in a sibling/previous box
+      const v = toInt(text(node.parentElement || node.previousElementSibling));
+      out[label.replace(/ /g, "").replace(/([A-Z])/g, (m) => m.toLowerCase())] = v ?? null;
+    }
+  }
+  return out;
 }
 
 function scrapeAppointments() {
-  const table = byHeading("Appointments");
-  if (!table) return [];
-  // very light parse: read the appointment rows if they exist
-  const rows = $all("tr", table).slice(1, 8); // skip header, cap short list
-  return rows.map(tr => {
-    const cols = $all("td", tr).map(td => text(td));
-    // best effort: time, rep, customer
-    return { time: cols[0], rep: cols[1], customer: cols[2] };
-  }).filter(r => r.time || r.customer);
+  const card = byHeading("Appointments");
+  if (!card) return [];
+  const rows = $all("tr, .table-row, .grid-row", card);
+  return rows.slice(1, 6).map((r) => {
+    const cells = $all("td, .cell", r).map((c) => text(c));
+    return { row: cells.join(" | ") };
+  });
 }
 
 function scrapeActivity() {
-  const block = byHeading("Activity");
-  if (!block) return [];
-  const rows = $all("tr", block).slice(1, 10);
-  return rows.map(tr => {
-    const cols = $all("td", tr).map(td => text(td));
-    return { rep: cols[0], ups: cols[1], cls: cols[2], emls: cols[3], texts: cols[4], tsks: cols[5], sld: cols[6] };
-  }).filter(r => r.rep);
+  const card = byHeading("Activity");
+  if (!card) return [];
+  const rows = $all("tr, .table-row, .grid-row", card);
+  return rows.slice(1, 6).map((r) => {
+    const cells = $all("td, .cell", r).map((c) => text(c));
+    return { row: cells.join(" | ") };
+  });
 }
 
-/* The main payload we send to the local API */
 function scrapeDealerDashboard() {
-  return {
+  const payload = {
     url: location.href,
     title: document.title,
-    store: text(document.querySelector('[data-qa="dealer-name"], .enterprise, .dealer, .header') || document.querySelector("title")),
-    dateRange: (() => {
-      const a = document.querySelector("input[aria-label='Start date'], input[placeholder*='Start']");
-      const b = document.querySelector("input[aria-label='End date'], input[placeholder*='End']");
-      const left = text(a) || a?.value || "";
-      const right = text(b) || b?.value || "";
-      return left && right ? `${left} – ${right}` : (left || right || "");
-    })(),
+    store: text($one('[id*="storeName"], [class*="store"], [class*="dealer"]')) || "",
+    dateRange: (text($one('input[placeholder*="date"], .date-range')) || text(byHeading("This page will auto refresh"))).replace(/\s+/g, " ").trim() || "",
     salesFunnel: scrapeSalesFunnel(),
     kpis: scrapeKPIs(),
     appointments: scrapeAppointments(),
     activity: scrapeActivity()
   };
+  return payload;
+}
+
+/* ---------- summary formatter (fallback if API is down) ---------- */
+function formatSummary(p) {
+  const k = p.kpis || {};
+  const sf = p.salesFunnel || {};
+  return [
+    `${p.title || "Vinconnect"} — ${p.store || "Vinconnect"}`,
+    `Leads: ${toInt($one('[data-qa="leads-count"]')?.textContent) ?? ""}`,
+    `Contacted: ${sf.contacted ?? ""} | Appts Set: ${sf.apptsSet ?? ""} | Shown: ${sf.apptsShown ?? ""} | Sold: ${sf.sold ?? ""}`,
+    `KPIs — Unanswered: ${k.unansweredComms ?? ""}, Open visits: ${k.openVisits ?? ""}, Buying signals: ${k.buyingSignals ?? ""}, Pending deals: ${k.pendingDeals ?? ""}`,
+    `URL: ${p.url}`
+  ].join("\n");
 }
 
 /* ---------- panel UI ---------- */
@@ -98,83 +117,87 @@ function ensurePanel() {
   root.innerHTML = `
     <button id="quirk-fab" style="
       width:56px;height:56px;border-radius:28px;border:none;
-      background:#0b6b3c;color:#fff;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer
-    ">Quirk</button>
+      background:#0b6b3c;color:#fff;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.25);
+      cursor:pointer;">Quirk</button>
     <div id="quirk-card" style="
-      display:none; width: 400px; max-height: 420px; overflow:auto;
-      background:#fff; border-radius:12px; box-shadow:0 8px 28px rgba(0,0,0,.35);
-      padding:12px; margin-bottom:8px
-    ">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <div style="font-weight:700">Quirk Helper</div>
-        <div style="opacity:.6;font-size:12px">${text(document.querySelector('.enterprise')) || 'Vinconnect'}</div>
-      </div>
+      display:none;position:absolute; right:72px; bottom:0;
+      width:380px; background:#fff; border-radius:12px; box-shadow:0 18px 48px rgba(0,0,0,.35);
+      padding:14px;">
+      <div style="font-weight:600; margin-bottom:8px">Quirk Helper <span style="opacity:.6;font-weight:400;">Vinconnect</span></div>
       <div style="display:flex; gap:8px; margin-bottom:8px">
-        <button data-action="scrape" style="background:#0b6b3c;color:#fff;border:none;padding:8px 10px;border-radius:8px;cursor:pointer">Scrape dashboard</button>
-        <button data-action="copy"   style="background:#e6eef2;color:#111;border:none;padding:8px 10px;border-radius:8px;cursor:pointer">Copy</button>
-        <button data-action="download" style="background:#e6eef2;color:#111;border:none;padding:8px 10px;border-radius:8px;cursor:pointer">Download</button>
+        <button data-action="scrape" class="qbtn">Scrape dashboard</button>
+        <button data-action="copy" class="qbtn">Copy</button>
+        <button data-action="download" class="qbtn">Download</button>
       </div>
-      <pre id="quirk-pre" style="white-space:pre-wrap; font-size:12px; line-height:1.35; margin:0"></pre>
+      <pre id="quirk-output" style="margin:0;max-height:220px;overflow:auto;background:#23262d;color:#dfe6ef;padding:10px;border-radius:8px;white-space:pre-wrap;"></pre>
     </div>
   `;
-  document.body.appendChild(root);
+  document.documentElement.appendChild(root);
 
-  const fab = root.querySelector("#quirk-fab");
-  const card = root.querySelector("#quirk-card");
-  fab.onclick = () => card.style.display = card.style.display === "none" ? "block" : "none";
+  for (const b of root.querySelectorAll(".qbtn")) {
+    b.style.cssText = `
+      padding:8px 10px;border-radius:8px;border:1px solid #ddd;background:#f6f7f9;cursor:pointer;
+    `;
+  }
+
+  root.querySelector("#quirk-fab").onclick = () => {
+    const card = root.querySelector("#quirk-card");
+    card.style.display = card.style.display === "none" ? "block" : "none";
+  };
+
+  root.querySelector('[data-action="scrape"]').onclick = onScrape;
+  root.querySelector('[data-action="copy"]').onclick = onCopy;
+  root.querySelector('[data-action="download"]').onclick = onDownload;
+
   return root;
 }
 
-function downloadJSON(obj, name = "quirk-dashboard.json") {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
-  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
-  a.click(); URL.revokeObjectURL(a.href);
-}
-function copyJSON(obj) {
-  navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
-}
+/* ---------- actions ---------- */
+async function onScrape() {
+  const pre = ensurePanel().querySelector("#quirk-output");
+  pre.textContent = "Working…";
+  const payload = scrapeDealerDashboard();
 
-/* Call the local API and show a human-friendly result (or a clear error) */
-async function sendToLocalAPI(payload, preEl) {
-  preEl.textContent = "Sending to local API…";
+  // try local FastAPI first, then fall back to our local summary
   try {
-    const resp = await fetch("http://127.0.0.1:8765/summarize", {
+    const res = await fetch("http://127.0.0.1:8765/summarize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payload })
+      body: JSON.stringify(payload)
     });
-    const data = await resp.json().catch(() => null);
-    if (!resp.ok) {
-      preEl.textContent =
-        `Local API error (${resp.status}).\n` +
-        (data ? JSON.stringify(data, null, 2) + "\n" : "") +
-        `Tip: Did you restart the FastAPI server and see /docs?`;
-      return;
-    }
-    if (data && typeof data.summary === "string") {
-      preEl.textContent = data.summary;
-    } else {
-      preEl.textContent = JSON.stringify(data ?? {}, null, 2);
-    }
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    pre.textContent = data?.summary || formatSummary(payload);
   } catch (e) {
-    preEl.textContent = `Could not reach local API: ${e?.message || e}`;
+    pre.textContent = "Could not reach local API: " + (e?.message || "Failed to fetch") + "\n\n" + formatSummary(payload);
   }
 }
 
-/* ---------- init ---------- */
-(function init() {
-  const panel = ensurePanel();
-  const pre = panel.querySelector("#quirk-pre");
-  const btnScrape = panel.querySelector("[data-action='scrape']");
-  const btnCopy   = panel.querySelector("[data-action='copy']");
-  const btnDown   = panel.querySelector("[data-action='download']");
+function onCopy() {
+  const pre = ensurePanel().querySelector("#quirk-output");
+  navigator.clipboard.writeText(pre.textContent || "");
+}
 
-  btnScrape.onclick = async () => {
-    const payload = scrapeDealerDashboard();
-    await sendToLocalAPI(payload, pre);
-    // stash last payload on the element for Copy/Download
-    pre._lastPayload = payload;
-  };
-  btnCopy.onclick = () => pre._lastPayload && copyJSON(pre._lastPayload);
-  btnDown.onclick = () => pre._lastPayload && downloadJSON(pre._lastPayload);
-})();
+function onDownload() {
+  const pre = ensurePanel().querySelector("#quirk-output");
+  const blob = new Blob([pre.textContent || ""], { type: "text/plain" });
+  const a = Object.assign(document.createElement("a"), {
+    href: URL.createObjectURL(blob),
+    download: "quirk-dashboard.txt"
+  });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/* ---------- boot ---------- */
+function boot() {
+  ensurePanel();
+  // Message from background (Alt+Q or toolbar)
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === "quirk:toggle") {
+      const card = ensurePanel().querySelector("#quirk-card");
+      card.style.display = card.style.display === "none" ? "block" : "none";
+    }
+  });
+}
+boot();
