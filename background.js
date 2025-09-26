@@ -1,13 +1,8 @@
-// Quirk AI Sidecar – MV3 service worker
+// Quirk AI Sidecar – background
 
 console.log("Quirk Sidecar service worker alive");
 
-// Install/update
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("Installed/updated");
-});
-
-// Toolbar button click (guarded)
+// Toolbar button (if action exists)
 if (chrome.action && chrome.action.onClicked) {
   chrome.action.onClicked.addListener(async (tab) => {
     try {
@@ -16,16 +11,14 @@ if (chrome.action && chrome.action.onClicked) {
       console.warn("No content script on this page yet:", err?.message);
     }
   });
-} else {
-  console.warn("chrome.action.onClicked not available in this context");
 }
 
-// Keyboard shortcut Alt+Q (guarded)
+// Keyboard shortcut Alt+Q (manifest commands)
 if (chrome.commands && chrome.commands.onCommand) {
   chrome.commands.onCommand.addListener(async (command) => {
     if (command === "trigger-quirk") {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) return;
+      if (!tab) return;
       try {
         await chrome.tabs.sendMessage(tab.id, { type: "quirk:toggle" });
       } catch (err) {
@@ -35,7 +28,7 @@ if (chrome.commands && chrome.commands.onCommand) {
   });
 }
 
-// Optional: accept logs from content script
+// Optional: accept logs from the page
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "quirk:log") {
     console.log("[from content]", msg.data);
