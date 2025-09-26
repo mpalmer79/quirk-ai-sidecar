@@ -1,24 +1,29 @@
+// background.js
+
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("Quirk Sidecar installed");
+  console.log("Quirk Sidecar background ready");
 });
 
-// Keyboard shortcut -> inject (if needed) + tell the page to toggle the panel
+// Alt+Q (or your shortcut) -> tell the content script to toggle the panel
 chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== "open-quirk-panel") return;
-
+  if (command !== "toggle-panel") return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
+  if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "toggle-panel" });
+});
 
-  // Attempt to inject content.js (no-op if already present or not permitted)
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content.js"]
-    });
-  } catch (e) {
-    // Ignore if already injected / host not permitted
-    console.debug("Inject attempt:", e?.message || e);
-  }
+// Handle summarize requests from the content script in the background.
+// Doing fetch here avoids mixed-content issues on https pages.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== "summarize") return;
 
-  chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_QUIRK_PANEL" });
+  fetch("http://127.0.0.1:8765/summarize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note: msg.note || "" })
+  })
+    .then((r) => r.json())
+    .then((data) => sendResponse({ ok: true, data }))
+    .catch((err) => sendResponse({ ok: false, error: String(err) }));
+
+  return true; // keep the message channel open for async sendResponse
 });
