@@ -1,44 +1,44 @@
-// Send a "toggle" message to the active tab
-async function toggleInActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) return;
+// Quirk AI Sidecar – MV3 service worker
 
-  chrome.tabs.sendMessage(tab.id, { type: "toggle" }, () => {
-    // If the content script isn't injected (wrong matches), you'll see this:
-    if (chrome.runtime.lastError) {
-      console.debug("Sidecar: no receiver on this tab:", chrome.runtime.lastError.message);
+console.log("Quirk Sidecar service worker alive");
+
+// Install/update
+chrome.runtime.onInstalled.addListener(() => {
+  console.log("Installed/updated");
+});
+
+// Toolbar button click (guarded)
+if (chrome.action && chrome.action.onClicked) {
+  chrome.action.onClicked.addListener(async (tab) => {
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: "quirk:toggle" });
+    } catch (err) {
+      console.warn("No content script on this page yet:", err?.message);
+    }
+  });
+} else {
+  console.warn("chrome.action.onClicked not available in this context");
+}
+
+// Keyboard shortcut Alt+Q (guarded)
+if (chrome.commands && chrome.commands.onCommand) {
+  chrome.commands.onCommand.addListener(async (command) => {
+    if (command === "trigger-quirk") {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) return;
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: "quirk:toggle" });
+      } catch (err) {
+        console.warn("No content script on this page yet:", err?.message);
+      }
     }
   });
 }
 
-// Toolbar button click
-chrome.action.onClicked.addListener(() => toggleInActiveTab());
-
-// Keyboard shortcut (Alt+Q)
-chrome.commands.onCommand.addListener((command) => {
-  if (command === "toggle-sidecar") toggleInActiveTab();
-});
-// Trigger scrape from keyboard or context-menu
-chrome.commands?.onCommand.addListener(cmd => {
-  if (cmd === "quirk-scrape-dashboard") {
-    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-      if (tabs[0]?.id) {
-        chrome.tabs.sendMessage(tabs[0].id, { type: "quirk:scrape-dashboard" });
-      }
-    });
-  }
-});
-
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "quirk-scrape-dashboard",
-    title: "Quirk: Scrape Dashboard → Local API",
-    contexts: ["all"]
-  });
-});
-
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "quirk-scrape-dashboard" && tab?.id) {
-    chrome.tabs.sendMessage(tab.id, { type: "quirk:scrape-dashboard" });
+// Optional: accept logs from content script
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "quirk:log") {
+    console.log("[from content]", msg.data);
+    if (typeof sendResponse === "function") sendResponse({ ok: true });
   }
 });
