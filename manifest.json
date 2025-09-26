@@ -9,25 +9,23 @@
     "https://vinsolutions.app.coxautoinc.com/*",
     "http://127.0.0.1:8765/*"
   ],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Quirk AI Sidecar" },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Quirk AI Sidecar"
+  },
+  "commands": {
+    "trigger-quirk": {
+      "description": "Open Quirk helper",
+      "suggested_key": { "default": "Alt+Q" }
+    }
+  },
   "content_scripts": [
     {
-      "matches": [
-        "https://*.vinsolutions.com/*",
-        "https://vinsolutions.app.coxautoinc.com/*"
-      ],
-      "run_at": "document_idle",
-      "js": ["content.js"]
+      "matches": ["https://vinsolutions.app.coxautoinc.com/vinconnect/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
     }
-  ],
-  "commands": {
-    "toggle-sidecar": {
-      "suggested_key": {
-        "default": "Alt+Q",
-        "windows": "Alt+Q"
-      },
-      "description": "Toggle Quirk Sidecar panel"
-    }
-  }
+  ]
 }
