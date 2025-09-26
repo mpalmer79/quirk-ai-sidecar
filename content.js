@@ -1,431 +1,392 @@
-// content.js  — Quirk AI Sidecar
-// Dashboard summary + Chat "Suggest edits" with one-click insert.
+// content.js — Quirk AI Sidecar (single-inject, popup-aware)
 
-// ---------- CONFIG ----------
-const API_BASE = "http://127.0.0.1:8765";
-const FETCH_TIMEOUT_MS = 15000;
-const MAX_CHAT_CHARS = 4000;
+(() => {
+  // Inject only in top-level pages (not iframes),
+  // and only once per document.
+  if (window.top !== window) return;
+  if (window.__quirkHelperInjected) return;
+  window.__quirkHelperInjected = true;
 
-// ---------- UTILS ----------
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const ROOT_ID = "quirk-helper-root";
+  if (document.getElementById(ROOT_ID)) return;
 
-function el(tag, props = {}, ...kids) {
-  const n = document.createElement(tag);
-  Object.assign(n, props);
-  for (const k of kids) n.append(k);
-  return n;
-}
+  // ------------------------------
+  // Utilities
+  // ------------------------------
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const asInt = (s) => {
+    const m = String(s ?? "").match(/\b\d+\b/);
+    return m ? parseInt(m[0], 10) : null;
+  };
+  const getText = (el) => (el ? (el.innerText || el.textContent || "").trim() : "");
 
-function on(elm, ev, fn, opts) { elm.addEventListener(ev, fn, opts); return () => elm.removeEventListener(ev, fn, opts); }
-
-async function fetchJSON(url, opts) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { ...opts, signal: ctl.signal });
-    const txt = await res.text();
-    try { return { ok: res.ok, status: res.status, data: JSON.parse(txt) }; }
-    catch { return { ok: res.ok, status: res.status, data: txt }; }
-  } finally { clearTimeout(t); }
-}
-
-function copyText(s) { navigator.clipboard.writeText(s).catch(()=>{}); }
-
-function downloadString(name, mime, content) {
-  const blob = new Blob([content], { type: mime });
-  const a = el("a", { href: URL.createObjectURL(blob), download: name });
-  document.body.append(a); a.click(); a.remove();
-  URL.revokeObjectURL(a.href);
-}
-
-function downloadableFilename(prefix, ext = "txt") {
-  const t = new Date().toISOString().replace(/[:.]/g, "-");
-  return `${prefix}-${t}.${ext}`;
-}
-
-function isVisible(node) {
-  if (!node) return false;
-  const s = getComputedStyle(node);
-  if (s.visibility === "hidden" || s.display === "none") return false;
-  const r = node.getBoundingClientRect();
-  return r.width > 4 && r.height > 4;
-}
-
-// ---------- UI MOUNT ----------
-let panel, pre, primaryBtn, copyBtn, dlBtn, modeSpan, sugBox;
-
-function mountUI() {
-  if (panel) return;
-
-  const bubble = el("button", {
-    className: "quirk-bubble",
-    title: "Quirk",
-    innerText: "Quirk"
-  });
-  Object.assign(bubble.style, {
-    position: "fixed", zIndex: 2147483647, right: "18px", bottom: "18px",
-    width: "48px", height: "48px", borderRadius: "50%",
-    background: "#0ea5e9", color: "#fff", border: "none", fontWeight: 800,
-    boxShadow: "0 6px 18px rgba(0,0,0,.2)", cursor: "pointer"
-  });
-
-  modeSpan = el("span", { style: "color:#6b7280;margin-left:.5rem" });
-
-  pre = el("pre", {
-    style: "margin:.75rem 0 0; max-height: 280px; overflow:auto; " +
-           "background:#0b1220; color:#e5e7eb; padding:.5rem; border-radius:.5rem; font-size:12px;"
-  });
-
-  sugBox = el("div", { style: "margin-top:.5rem; display:none; gap:.5rem; flex-direction:column;" });
-
-  primaryBtn = el("button", { textContent: "Scrape dashboard" });
-  Object.assign(primaryBtn.style, {
-    background: "#2563eb", color: "#fff", border: "none",
-    borderRadius: ".5rem", padding: ".5rem .9rem", cursor: "pointer", fontWeight: 600
-  });
-
-  copyBtn = el("button", { textContent: "Copy" });
-  dlBtn = el("button", { textContent: "Download" });
-  for (const b of [copyBtn, dlBtn]) {
-    Object.assign(b.style, {
-      marginLeft: ".5rem", padding: ".5rem .9rem", borderRadius: ".5rem",
-      border: "1px solid #d1d5db", background: "#fff", cursor: "pointer"
+  function fetchJSON(url, body) {
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      return res.json();
     });
   }
 
-  panel = el("div", {},
-    el("div", {
-      style: "position:fixed; right:84px; bottom:18px; width:420px; max-width:calc(100vw - 32px);" +
-             "background:#fff; border:1px solid #e5e7eb; border-radius:.75rem; box-shadow:0 16px 40px rgba(0,0,0,.22);" +
-             "z-index:2147483646; padding:12px;"
-    },
-      el("div", { style:"display:flex; align-items:center; gap:.5rem;" },
-        el("strong", { textContent: "Quirk Helper" }),
-        modeSpan,
-        el("div", { style: "flex:1" }),
-        primaryBtn, copyBtn, dlBtn
-      ),
-      pre,
-      sugBox
-    )
-  );
-
-  document.documentElement.appendChild(bubble);
-  document.documentElement.appendChild(panel);
-
-  on(bubble, "click", () => {
-    const box = panel.firstElementChild;
-    const cur = getComputedStyle(box).display !== "none";
-    box.style.display = cur ? "none" : "block";
-  });
-
-  on(primaryBtn, "click", async () => {
-    if (currentContext() === "dashboard") await doScrapeDashboard();
-    else if (currentContext() === "chat") await doSuggestEdits();
-    else pre.textContent = "Unknown context. Open dealer dashboard or the VIN text pop-up.";
-  });
-
-  on(copyBtn, "click", () => copyText(pre.innerText));
-  on(dlBtn, "click", () => downloadString(
-    downloadableFilename("quirk-helper"), "text/plain", pre.innerText
-  ));
-
-  updateModeLabel();
-}
-
-// ---------- CONTEXT ----------
-function currentContext() {
-  const href = location.href.toLowerCase();
-  if (href.includes("/vinconnect/pane-both/vinconnect-dealer-dashboard")) return "dashboard";
-  if (href.includes("rims2.aspx") && href.includes("urlsettingname=communication")) return "chat";
-
-  const ta = document.querySelector("textarea");
-  if (ta && document.body.innerText.toLowerCase().includes("your conversation will begin")) return "chat";
-
-  if (document.querySelector("div:has(> div) .kpi, .vinconnect-dashboard, .sales-funnel")) return "dashboard";
-
-  return "unknown";
-}
-
-function updateModeLabel() {
-  const ctx = currentContext();
-  if (!panel) return;
-  sugBox.style.display = "none";
-  if (ctx === "dashboard") {
-    primaryBtn.textContent = "Scrape dashboard";
-    modeSpan.textContent = "Vinconnect";
-  } else if (ctx === "chat") {
-    primaryBtn.textContent = "Suggest edits";
-    modeSpan.textContent = "Vinconnect";
-  } else {
-    primaryBtn.textContent = "Detecting…";
-    modeSpan.textContent = "";
-  }
-}
-
-// ---------- DASHBOARD SCRAPE ----------
-function readInt(el, fallback = null) {
-  if (!el) return fallback;
-  const m = el.textContent.replace(/[, ]+/g, "").match(/-?\d+/);
-  return m ? parseInt(m[0], 10) : fallback;
-}
-function findByLabel(container, label) {
-  const lab = Array.from(container.querySelectorAll("*")).find(n =>
-    n.textContent.trim().toLowerCase() === label.toLowerCase()
-  );
-  if (!lab) return null;
-  const box = lab.closest("div,li,section") || lab.parentElement;
-  return box.querySelector("strong, .kpi-number, .value, .ng-binding") || box;
-}
-function scrapeDashboard() {
-  const root = document;
-  const salesRow = Array.from(root.querySelectorAll("div,section"))
-    .find(n => /sales\s*funnel/i.test(n.textContent));
-  const kpiRow = Array.from(root.querySelectorAll("div,section"))
-    .find(n => /key\s*performance\s*indicators/i.test(n.textContent));
-
-  const obj = {
-    url: location.href,
-    title: document.title,
-    store: document.body.innerText.match(/Quirk [^\n|]+/i)?.[0] || "Vinconnect",
-    dateRange: (() => {
-      const start = document.querySelector('input[type="text"][id*="Start"], input[type="text"][aria-label*="start"]')?.value;
-      const end   = document.querySelector('input[type="text"][id*="End"], input[type="text"][aria-label*="end"]')?.value;
-      return start && end ? `${start} – ${end}` : (document.querySelector("button[title='Today'], .kpi-date")?.textContent || "");
-    })(),
-    salesFunnel: {},
-    kpis: {},
-  };
-
-  if (salesRow) {
-    obj.salesFunnel.customers   = readInt(findByLabel(salesRow, "Customers"));
-    obj.salesFunnel.contacted   = readInt(findByLabel(salesRow, "Contacted"));
-    obj.salesFunnel.apptsSet    = readInt(findByLabel(salesRow, "Appts Set"));
-    obj.salesFunnel.apptsShown  = readInt(findByLabel(salesRow, "Appts Shown"));
-    obj.salesFunnel.sold        = readInt(findByLabel(salesRow, "Sold"));
-  }
-  if (kpiRow) {
-    obj.kpis.unansweredComms = readInt(findByLabel(kpiRow, "Unanswered Comms"));
-    obj.kpis.openVisits      = readInt(findByLabel(kpiRow, "Open Visits"));
-    obj.kpis.buyingSignals   = readInt(findByLabel(kpiRow, "Buying Signals"));
-    obj.kpis.pendingDeals    = readInt(findByLabel(kpiRow, "Pending Deals"));
-  }
-  return obj;
-}
-async function doScrapeDashboard() {
-  sugBox.style.display = "none";
-  pre.textContent = "Scraping dashboard…";
-  await sleep(50);
-  try {
-    const p = scrapeDashboard();
-    const lines = [
-      `${p.store} — ${p.title}`,
-      `Leads:`,
-      `  Customers: ${p.salesFunnel.customers ?? "—"}`,
-      `  Contacted: ${p.salesFunnel.contacted ?? "—"}`,
-      `  Appts Set: ${p.salesFunnel.apptsSet ?? "—"}`,
-      `  Shown: ${p.salesFunnel.apptsShown ?? "—"}`,
-      `  Sold: ${p.salesFunnel.sold ?? "—"}`,
-      `KPIs — Unanswered: ${p.kpis.unansweredComms ?? "—"}, Open visits: ${p.kpis.openVisits ?? "—"}, Buying signals: ${p.kpis.buyingSignals ?? "—"}, Pending deals: ${p.kpis.pendingDeals ?? "—"}`,
-      `URL: ${p.url}`
-    ];
-    pre.textContent = lines.join("\n");
-  } catch (err) {
-    pre.textContent = `Dashboard scrape error: ${String(err)}`;
-  }
-}
-
-// ---------- CHAT SCRAPE + SUGGESTIONS ----------
-function scrapeChatConversation() {
-  // try the scroll area above the reply box
-  const ta = document.querySelector("textarea");
-  let scrollArea = null;
-  if (ta) {
-    let p = ta.parentElement;
-    for (let i = 0; i < 6 && p; i++) {
-      scrollArea = scrollArea || Array.from(p.children).find(n => {
-        const s = getComputedStyle(n);
-        return (s.overflowY === "auto" || s.overflowY === "scroll") && n.innerText && n.innerText.length > 40;
-      });
-      p = p.parentElement;
+  // Rough DOM distance (for "nearest number" search)
+  function domDistance(a, b) {
+    if (!a || !b) return 1e9;
+    const pa = [];
+    let x = a;
+    while (x) {
+      pa.push(x);
+      x = x.parentElement;
     }
-  }
-  // generic bubbles
-  const bubbleSel = [ ".message-bubble", ".msg-bubble", ".bubble", ".message-item", ".k-message", "[class*='message'] [class*='text']" ];
-  const bubbles = bubbleSel.flatMap(sel => Array.from(document.querySelectorAll(sel)));
-  const bubbleText = bubbles.map(b => b.innerText.trim()).filter(Boolean);
-
-  let text = "";
-  if (scrollArea) text = scrollArea.innerText;
-  else if (bubbleText.length >= 3) text = bubbleText.join("\n\n");
-  else text = document.body.innerText;
-
-  text = text.replace(/\u00a0/g, " ").replace(/\r/g, "");
-  if (text.length > MAX_CHAT_CHARS) text = text.slice(-MAX_CHAT_CHARS);
-
-  const storeMatch = document.body.innerText.match(/Quirk [^\n|]+/i);
-  const customerMatch = document.body.innerText.match(/Customer:\s*([^\n]+)/i);
-
-  return {
-    url: location.href,
-    dealership: storeMatch ? storeMatch[0] : "Vinconnect",
-    customer: customerMatch ? customerMatch[1].trim() : "",
-    conversation: text.trim()
-  };
-}
-
-async function callLocalSuggestions(payload) {
-  let res = await fetchJSON(`${API_BASE}/suggest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  if (res.ok) return res.data;
-
-  const fb = await fetchJSON(`${API_BASE}/summarize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ payload })
-  });
-  if (fb.ok) return fb.data;
-
-  throw new Error(`Local API error (${res.status} then ${fb.status})`);
-}
-
-// ---- editor detection + insert
-function findReplyEditor() {
-  // 1) visible textarea
-  const ta = Array.from(document.querySelectorAll("textarea")).find(isVisible);
-  if (ta) return { kind: "textarea", el: ta };
-
-  // 2) contenteditable
-  const ce = Array.from(document.querySelectorAll('[contenteditable="true"]')).find(isVisible);
-  if (ce) return { kind: "contenteditable", el: ce };
-
-  // 3) input[type=text] fallback
-  const inp = Array.from(document.querySelectorAll('input[type="text"], input[type="search"]')).find(isVisible);
-  if (inp) return { kind: "input", el: inp };
-
-  return null;
-}
-
-function dispatchInput(el) {
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
-}
-
-function insertTextIntoEditor(text) {
-  const ed = findReplyEditor();
-  if (!ed) {
-    pre.textContent += "\n[!] Could not locate the reply box to insert text.";
-    return false;
-  }
-  const { kind, el } = ed;
-
-  if (kind === "textarea" || kind === "input") {
-    el.focus();
-    el.value = text;
-    // place caret at end
-    try { el.setSelectionRange(el.value.length, el.value.length); } catch {}
-    dispatchInput(el);
-    return true;
-  }
-
-  if (kind === "contenteditable") {
-    el.focus();
-    // try execCommand; fallback to plain set
-    const ok = document.execCommand?.("selectAll", false, null);
-    if (ok) document.execCommand("insertText", false, text);
-    else {
-      el.innerText = text;
+    const pb = [];
+    x = b;
+    while (x) {
+      pb.push(x);
+      x = x.parentElement;
     }
-    dispatchInput(el);
-    return true;
-  }
-
-  return false;
-}
-
-// ---- render suggestions as clickable cards
-function normalizeSuggestions(result) {
-  if (Array.isArray(result?.suggestions)) {
-    return result.suggestions.map(s => String(s)).filter(s => s.trim());
-  }
-  if (typeof result === "string") {
-    // Best effort split into 2–5 suggestions.
-    const parts = result.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
-    return parts.length ? parts.slice(0, 5) : [result];
-  }
-  return [JSON.stringify(result, null, 2)];
-}
-
-function renderSuggestions(arr) {
-  sugBox.innerHTML = "";
-  sugBox.style.display = "flex";
-  pre.textContent = "Click a suggestion to insert it into the reply box:";
-
-  arr.forEach((s, i) => {
-    const card = el("div", { style: "border:1px solid #e5e7eb; border-radius:.5rem; padding:.5rem; background:#fafafa;" });
-    const txt = el("div", { textContent: s, style: "white-space:pre-wrap; font-size:13px; line-height:1.35;" });
-    const row = el("div", { style: "margin-top:.5rem; display:flex; gap:.5rem; justify-content:flex-end;" });
-
-    const ins = el("button", { textContent: "Insert" });
-    const cpy = el("button", { textContent: "Copy" });
-    for (const b of [ins, cpy]) {
-      Object.assign(b.style, {
-        padding: ".35rem .7rem", borderRadius: ".5rem", cursor: "pointer",
-        border: "1px solid #d1d5db", background: "#fff"
-      });
+    let i = pa.length - 1;
+    let j = pb.length - 1;
+    while (i >= 0 && j >= 0 && pa[i] === pb[j]) {
+      i--;
+      j--;
     }
-    Object.assign(ins.style, { background:"#2563eb", color:"#fff", border:"none" });
+    return i + j + 2;
+  }
 
-    on(card, "click", (e) => {
-      // clicking anywhere in card inserts too (except the Copy button which stops propagation)
-      if (e.target === cpy) return;
-      insertTextIntoEditor(s);
+  // ------------------------------
+  // Context detection
+  // ------------------------------
+  function detectContext() {
+    const href = window.location.href;
+
+    // Dealer dashboard
+    if (/vinconnect\/pane-both\/vinconnect-dealer-dashboard/i.test(href)) {
+      return "dashboard";
+    }
+
+    // VIN communication windows (texts/emails)
+    const convoUrlHit =
+      (/CarDashboard\/Pages\/rims2\.aspx/i.test(href) &&
+        /SettingName=Communication/i.test(href)) ||
+      /LeadManagement\/GenAIHost\.aspx/i.test(href) ||
+      (/LeadManagement/i.test(href) && /Communication/i.test(href));
+
+    const convoDomHit = !!document.querySelector(
+      [
+        '[id*="Messages"]',
+        '[id*="Conversation"]',
+        '[class*="conversation"]',
+        '[class*="messages"]',
+        '[aria-label*="conversation"]',
+        '[aria-label*="messages"]',
+      ].join(",")
+    );
+
+    if (convoUrlHit || convoDomHit) return "conversation";
+
+    return null;
+  }
+
+  // ------------------------------
+  // Conversation scraper
+  // ------------------------------
+  function scrapeConversationText() {
+    const root =
+      document.querySelector(
+        [
+          '[id*="Messages"]',
+          '[id*="Conversation"]',
+          '[class*="conversation"]',
+          '[class*="messages"]',
+          "main",
+          "#content",
+        ].join(",")
+      ) || document.body;
+
+    const lines = [];
+    root.querySelectorAll("p,div,span,li,blockquote").forEach((node) => {
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return;
+
+      const t = getText(node);
+      if (!t) return;
+
+      // Skip huge blobs (script dumps, etc.)
+      if (t.length <= 1000 && /[A-Za-z]/.test(t)) lines.push(t);
     });
-    on(ins, "click", (e) => { e.stopPropagation(); insertTextIntoEditor(s); });
-    on(cpy, "click", (e) => { e.stopPropagation(); copyText(s); });
 
-    row.append(ins, cpy);
-    card.append(txt, row);
-    sugBox.append(card);
-  });
-}
-
-async function doSuggestEdits() {
-  const ctx = scrapeChatConversation();
-  if (!ctx.conversation || ctx.conversation.length < 20) {
-    sugBox.style.display = "none";
-    pre.textContent = "Could not find enough conversation text on this page.";
-    return;
+    return lines.slice(-40).join("\n");
   }
-  sugBox.style.display = "none";
-  pre.textContent = "Asking Quirk AI for suggested replies…";
 
-  try {
-    const result = await callLocalSuggestions(ctx);
-    const suggestions = normalizeSuggestions(result);
-    // also put the list into pre so global Copy/Download work
-    pre.textContent = suggestions.map((s, i) => `#${i + 1}\n${s}\n`).join("\n");
-    renderSuggestions(suggestions);
-  } catch (err) {
-    sugBox.style.display = "none";
-    pre.textContent = `Could not reach local API: ${String(err).replace(/^Error:\s*/, "")}`;
-  }
-}
+  // ------------------------------
+  // Dashboard scraper (label → nearest number)
+  // ------------------------------
+  function findCardByHeading(text) {
+    const re = new RegExp("\\b" + escRe(text) + "\\b", "i");
+    const label = [...document.querySelectorAll("h1,h2,h3,h4,h5,header,legend,div,span")]
+      .find((el) => re.test(getText(el)));
+    if (!label) return null;
 
-// ---------- INIT ----------
-(function init() {
-  try { mountUI(); updateModeLabel(); } catch {}
-
-  let lastHref = location.href;
-  setInterval(() => {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
-      updateModeLabel();
+    // Bubble to a card-like ancestor
+    let cur = label;
+    while (cur && cur !== document.body) {
+      const style = window.getComputedStyle(cur);
+      if (
+        /card|panel|widget|tile|box/i.test(cur.className || "") ||
+        style.border ||
+        style.boxShadow
+      ) {
+        return cur;
+      }
+      cur = cur.parentElement;
     }
-  }, 600);
+    return label.closest("section,article,div") || document.body;
+  }
 
-  setTimeout(updateModeLabel, 800);
+  function nearestNumberNear(el, root) {
+    const inThis = (node) => {
+      const t = getText(node);
+      return t && /^\d+$/.test(t);
+    };
+
+    // try close siblings up & down the tree
+    for (let up = el; up && up !== root; up = up.parentElement) {
+      // previous siblings
+      let s = up.previousElementSibling;
+      let hops = 0;
+      while (s && hops < 5) {
+        if (inThis(s)) return getText(s);
+        s = s.previousElementSibling;
+        hops++;
+      }
+      // next siblings
+      s = up.nextElementSibling;
+      hops = 0;
+      while (s && hops < 5) {
+        if (inThis(s)) return getText(s);
+        s = s.nextElementSibling;
+        hops++;
+      }
+    }
+
+    // fallback: closest numeric node in the card
+    const digits = [...root.querySelectorAll("*")].filter((n) => /^\s*\d+\s*$/.test(getText(n)));
+    if (!digits.length) return null;
+    digits.sort((a, b) => domDistance(el, a) - domDistance(el, b));
+    return getText(digits[0]) || null;
+  }
+
+  function getValueByLabel(container, label) {
+    const re = new RegExp("\\b" + escRe(label) + "\\b", "i");
+    const labelEl = [...container.querySelectorAll("*")].find((n) => re.test(getText(n)));
+    if (!labelEl) return null;
+    const num = nearestNumberNear(labelEl, container);
+    return asInt(num);
+  }
+
+  function getDateRange() {
+    // VIN uses two date inputs on dashboard
+    const start =
+      document.querySelector('input[type="text"][value][id*="StartDate"]') ||
+      document.querySelector('input[type="text"][value][name*="StartDate"]') ||
+      document.querySelector('input[type="text"][value]:nth-of-type(1)');
+    const end =
+      document.querySelector('input[type="text"][value][id*="EndDate"]') ||
+      document.querySelector('input[type="text"][value][name*="EndDate"]') ||
+      document.querySelector('input[type="text"][value]:nth-of-type(2)');
+
+    const s = start ? start.value : "";
+    const e = end ? end.value : s;
+    return [s, e].filter(Boolean).join(" – ");
+  }
+
+  function scrapeDealerDashboard() {
+    const salesCard = findCardByHeading("Sales Funnel") || document.body;
+    const kpiCard = findCardByHeading("Key Performance Indicators") || document.body;
+
+    const salesFunnel = {
+      customers: getValueByLabel(salesCard, "Customers"),
+      contacted: getValueByLabel(salesCard, "Contacted"),
+      apptsSet: getValueByLabel(salesCard, "Appts Set"),
+      apptsShown: getValueByLabel(salesCard, "Appts Shown"),
+      sold: getValueByLabel(salesCard, "Sold"),
+    };
+
+    const kpis = {
+      unansweredComms: getValueByLabel(kpiCard, "Unanswered Comms"),
+      openVisits: getValueByLabel(kpiCard, "Open Visits"),
+      buyingSignals: getValueByLabel(kpiCard, "Buying Signals"),
+      pendingDeals: getValueByLabel(kpiCard, "Pending Deals"),
+    };
+
+    return {
+      url: window.location.href,
+      title: "Vinconnect",
+      store: "Quirk Helper",
+      dateRange: getDateRange(),
+      salesFunnel,
+      kpis,
+    };
+  }
+
+  function summarizeDashboard(obj) {
+    const s = obj.salesFunnel || {};
+    const k = obj.kpis || {};
+    return [
+      "Vinconnect — Vinconnect",
+      "Leads:",
+      `Customers: ${s.customers ?? "—"} | Contacted: ${s.contacted ?? "—"} | Appts Set: ${s.apptsSet ?? "—"} | Shown: ${s.apptsShown ?? "—"} | Sold: ${s.sold ?? "—"}`,
+      `KPIs — Unanswered: ${k.unansweredComms ?? "—"}, Open visits: ${k.openVisits ?? "—"}, Buying signals: ${k.buyingSignals ?? "—"}, Pending deals: ${k.pendingDeals ?? "—"}`,
+      `URL: ${obj.url}`,
+    ].join("\n");
+  }
+
+  // ------------------------------
+  // Local API bridge
+  // ------------------------------
+  async function sendToLocalAPI(body) {
+    try {
+      const data = await fetchJSON("http://127.0.0.1:8765/summarize", body);
+      return data; // {summary: "..."} expected
+    } catch (err) {
+      return { error: String(err) };
+    }
+  }
+
+  // ------------------------------
+  // UI
+  // ------------------------------
+  const style = document.createElement("style");
+  style.textContent = `
+#${ROOT_ID} { position: fixed; right: 18px; bottom: 18px; z-index: 2147483646; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+#${ROOT_ID} .quirk-fab { background: #0b7a4b; color: #fff; width: 56px; height: 56px; border-radius: 50%; box-shadow: 0 6px 18px rgba(0,0,0,.2); display:flex; align-items:center; justify-content:center; cursor:pointer; font-weight:700; }
+#${ROOT_ID} .panel { position: absolute; right: 72px; bottom: 0; width: 420px; background:#fff; border-radius:12px; box-shadow: 0 18px 40px rgba(0,0,0,.25); border:1px solid rgba(0,0,0,.08); overflow:hidden; }
+#${ROOT_ID} .hdr { display:flex; align-items:center; gap:12px; padding:12px 14px; border-bottom:1px solid rgba(0,0,0,.07); }
+#${ROOT_ID} .hdr .title { font-weight:800; }
+#${ROOT_ID} .hdr .sub { color:#778; font-size:12px; }
+#${ROOT_ID} .actions { margin-left:auto; display:flex; gap:8px; }
+#${ROOT_ID} .btn { padding:9px 14px; border-radius:10px; border:1px solid rgba(0,0,0,.1); background:#fff; cursor:pointer; font-weight:600; }
+#${ROOT_ID} .btn.primary { background:#2563eb; color:#fff; border-color:#1e4fd3; }
+#${ROOT_ID} pre { margin:0; padding:10px 12px; max-height:220px; overflow:auto; background:#0b1220; color:#dfe8f7; font-size:12.5px; }
+#${ROOT_ID} .bar { height:8px; background:#0b1220; margin:8px 12px; border-radius:6px; position:relative; overflow:hidden; }
+#${ROOT_ID} .bar::after { content:""; position:absolute; inset:0; background:linear-gradient(90deg, #1e3a8a, #0ea5e9, #22c55e); transform:translateX(-70%); animation: qslide 1.6s linear infinite; }
+@keyframes qslide { 0% { transform: translateX(-70%);} 100% { transform: translateX(100%);} }
+  `;
+  document.head.appendChild(style);
+
+  const root = document.createElement("div");
+  root.id = ROOT_ID;
+
+  root.innerHTML = `
+    <div class="panel" style="display:none">
+      <div class="hdr">
+        <div>
+          <div class="title">Quirk Helper</div>
+          <div class="sub">Vinconnect</div>
+        </div>
+        <div class="actions">
+          <button class="btn primary" data-action="primary">Scrape dashboard</button>
+          <button class="btn" data-action="copy">Copy</button>
+          <button class="btn" data-action="download">Download</button>
+        </div>
+      </div>
+      <div class="bar"></div>
+      <pre id="quirk-pre">{idle}</pre>
+    </div>
+    <div class="quirk-fab" title="Quirk">Quirk</div>
+  `;
+  document.body.appendChild(root);
+
+  const panel = root.querySelector(".panel");
+  const fab = root.querySelector(".quirk-fab");
+  const pre = root.querySelector("#quirk-pre");
+  const primaryBtn = root.querySelector('[data-action="primary"]');
+
+  function togglePanel() {
+    const isOpen = panel.style.display !== "none";
+    panel.style.display = isOpen ? "none" : "block";
+    if (!isOpen) updatePrimaryButtonText();
+  }
+
+  function updatePrimaryButtonText() {
+    const ctx = detectContext();
+    primaryBtn.textContent = ctx === "conversation" ? "Suggest edits" : "Scrape dashboard";
+  }
+
+  fab.addEventListener("click", togglePanel);
+
+  // Actions
+  root.querySelector('[data-action="copy"]').addEventListener("click", async () => {
+    await navigator.clipboard.writeText(pre.textContent || "");
+    pre.textContent += "\n(copied)";
+  });
+
+  root.querySelector('[data-action="download"]').addEventListener("click", () => {
+    const blob = new Blob([pre.textContent || ""], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "quirk-output.txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  primaryBtn.addEventListener("click", () => handlePrimaryAction(pre));
+
+  async function handlePrimaryAction(preEl) {
+    const ctx = detectContext();
+    updatePrimaryButtonText();
+
+    if (ctx === "dashboard") {
+      preEl.textContent = "Scraping dashboard...";
+      const payload = scrapeDealerDashboard();
+
+      // try local API first
+      const api = await sendToLocalAPI({ payload }).catch(() => null);
+      if (api && api.summary) {
+        preEl.textContent = api.summary;
+      } else {
+        preEl.textContent =
+          "Could not reach local API: Failed to fetch\n\n" + summarizeDashboard(payload);
+      }
+      return;
+    }
+
+    if (ctx === "conversation") {
+      preEl.textContent = "Reading conversation...";
+      const convo = scrapeConversationText();
+      if (!convo || convo.length < 10) {
+        preEl.textContent = "Could not read conversation text on this page.";
+        return;
+      }
+
+      const body = {
+        type: "conversation",
+        url: window.location.href,
+        content: convo,
+      };
+
+      const api = await sendToLocalAPI({ payload: body }).catch(() => null);
+      if (api && api.summary) {
+        preEl.textContent = api.summary;
+      } else {
+        // Fallback: simple helper prompt
+        preEl.textContent =
+          "Could not reach local API: Failed to fetch\n\n" +
+          "Draft a concise, friendly reply to the customer based on this conversation:\n\n" +
+          convo.slice(-1500);
+      }
+      return;
+    }
+
+    preEl.textContent =
+      "Unknown context. Open dealer dashboard or a VIN text/email pop-up.";
+  }
+
+  // Open panel on first inject so users see the state, then close
+  // (optional – comment out if you prefer closed by default)
+  // panel.style.display = "block";
+  // setTimeout(() => (panel.style.display = "none"), 2000);
 })();
