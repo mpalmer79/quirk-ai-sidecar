@@ -1,9 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Quirk AI Sidecar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Helper tools for VIN Solutions.",
-
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "https://*.vinsolutions.com/*",
