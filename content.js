@@ -1,479 +1,355 @@
-// =====================
-// Quirk AI Sidecar - content.js
-// Paste this whole file over your existing content.js
-// =====================
-(() => {
-  // ---------- small utils ----------
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const normTxt = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
-  const onlyDigits = (s) => {
-    const m = (s || "").trim().match(/^\d{1,4}$/); // 1–4 digits
-    return m ? parseInt(m[0], 10) : null;
-  };
-  const isVisible = (el) => {
-    if (!el || !(el instanceof Element)) return false;
-    const cs = getComputedStyle(el);
-    if (cs.visibility === "hidden" || cs.display === "none") return false;
-    if (!el.offsetParent && cs.position !== "fixed") return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
+// content.js  — Quirk AI Sidecar (dashboard + chat helper)
+// --------------------------------------------------------
 
-  // ---------- section locators ----------
-  function findSectionRoot(labelAliases) {
-    // Try to find an element whose text equals one of the aliases, and use a nearby ancestor as "section root".
-    const all = Array.from(document.querySelectorAll("*")).filter(isVisible);
-    for (const el of all) {
-      const t = normTxt(el.textContent);
-      for (const alias of labelAliases) {
-        if (t === normTxt(alias)) {
-          // climb a bit to get a card/container that holds the grid of tiles
-          let p = el;
-          for (let i = 0; i < 6 && p && p.parentElement; i++) {
-            p = p.parentElement;
-            // A heuristic: stop when this ancestor has multiple children and some numbers inside
-            const nums = Array.from(p.querySelectorAll("*"))
-              .filter(e => isVisible(e) && onlyDigits(e.textContent) !== null);
-            if (nums.length >= 2) return p;
-          }
-          return el.parentElement || document.body;
-        }
-      }
-    }
-    // fallback: whole document
-    return document.body;
-  }
+// ---- config ---------------------------------------------------------------
+const API_BASE = "http://127.0.0.1:8765";
+const FETCH_TIMEOUT_MS = 15000;
+const MAX_CHAT_CHARS = 4000;
 
-  // ---------- number extraction near a label ----------
-  function findNearestNumberInContainer(container, labelEl) {
-    // Prefer numbers inside same container; fallback to whole document
-    const pool = (container && container.querySelectorAll)
-      ? Array.from(container.querySelectorAll("*"))
-      : Array.from(document.querySelectorAll("*"));
+// ---- small utils ----------------------------------------------------------
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    const candidates = pool.filter(el => {
-      if (!isVisible(el)) return false;
-      const val = onlyDigits(el.textContent);
-      return val !== null;
-    });
+function el(tag, props = {}, ...kids) {
+  const n = document.createElement(tag);
+  Object.assign(n, props);
+  for (const k of kids) n.append(k);
+  return n;
+}
 
-    if (!candidates.length) return null;
+function on(elm, ev, fn, opts) { elm.addEventListener(ev, fn, opts); return () => elm.removeEventListener(ev, fn, opts); }
 
-    const L = labelEl.getBoundingClientRect();
-    let best = null;
-    let bestScore = Infinity;
+async function fetchJSON(url, opts) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { ...opts, signal: ctl.signal });
+    const txt = await res.text();
+    // Try JSON; if it's plain text, wrap it.
+    try { return { ok: res.ok, status: res.status, data: JSON.parse(txt) }; }
+    catch { return { ok: res.ok, status: res.status, data: txt }; }
+  } finally { clearTimeout(t); }
+}
 
-    for (const c of candidates) {
-      const R = c.getBoundingClientRect();
-      // distance center-to-center
-      const dx = (R.left + R.width / 2) - (L.left + L.width / 2);
-      const dy = (R.top + R.height / 2) - (L.top + L.height / 2);
+function copyText(s) { navigator.clipboard.writeText(s).catch(()=>{}); }
 
-      // Slight bias for numbers to the left (common layout for tiles)
-      const sideBias = (R.left < L.left ? 0 : 50);
-      const score = dx * dx + dy * dy + sideBias;
+function downloadableFilename(prefix, ext = "txt") {
+  const t = new Date().toISOString().replace(/[:.]/g, "-");
+  return `${prefix}-${t}.${ext}`;
+}
 
-      if (score < bestScore) {
-        bestScore = score;
-        best = c;
-      }
-    }
-    return best ? onlyDigits(best.textContent) : null;
-  }
+function downloadString(name, mime, content) {
+  const blob = new Blob([content], { type: mime });
+  const a = el("a", { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+}
 
-  // get the number "nearest to" a label, with aliases and fallbacks
-  function getNumberNearLabel(sectionRoot, labelTextOrList) {
-    const labels = Array.isArray(labelTextOrList) ? labelTextOrList : [labelTextOrList];
-    const all = Array.from(sectionRoot.querySelectorAll("*")).filter(isVisible);
-    let labelEls = [];
+// ---- mount floating bubble + panel ---------------------------------------
+let panel, pre, primaryBtn, copyBtn, dlBtn, modeSpan;
 
-    // exact match pass
-    for (const aliasRaw of labels) {
-      const alias = normTxt(aliasRaw);
-      const found = all.filter(el => normTxt(el.textContent) === alias);
-      if (found.length) { labelEls = found; break; }
-    }
-    // contains() pass
-    if (!labelEls.length) {
-      for (const aliasRaw of labels) {
-        const alias = normTxt(aliasRaw);
-        const found = all.filter(el => normTxt(el.textContent).includes(alias));
-        if (found.length) { labelEls = found; break; }
-      }
-    }
-    if (!labelEls.length) return 0;
+function mountUI() {
+  if (panel) return;
 
-    const labelEl = labelEls[0];
-
-    // Try: previous siblings first (common "number tile left of label" layout)
-    let sib = labelEl.previousElementSibling;
-    for (let i = 0; i < 3 && sib; i++) {
-      const n = onlyDigits(sib.textContent);
-      if (n !== null) return n;
-      sib = sib.previousElementSibling;
-    }
-
-    // Search inside the same container
-    const inContainer = findNearestNumberInContainer(sectionRoot, labelEl);
-    if (inContainer !== null) return inContainer;
-
-    // Fallback: entire document nearest number
-    const anywhere = findNearestNumberInContainer(document.body, labelEl);
-    return anywhere !== null ? anywhere : 0;
-  }
-
-  // ---------- label maps (with aliases) ----------
-  const salesMap = {
-    customers:  ["Customers", "Customer", "Cust"],
-    contacted:  ["Contacted"],
-    apptsSet:   ["Appts Set", "Appointments Set"],
-    apptsShown: ["Appts Shown", "Appointments Shown"],
-    sold:       ["Sold"]
-  };
-
-  const kpiMap = {
-    unansweredComms: ["Unanswered Comms", "Unanswered Communications"],
-    openVisits:      ["Open Visits"],
-    buyingSignals:   ["Buying Signals"],
-    pendingDeals:    ["Pending Deals"]
-  };
-
-  // ---------- scraping ----------
-  function scrapeDealerDashboard() {
-    // find section roots by their headings
-    const salesRoot = findSectionRoot(["Sales Funnel"]);
-    const kpiRoot   = findSectionRoot(["Key Performance Indicators", "Key Performance Indicator", "KPI"]);
-
-    const salesFunnel = {
-      customers:  getNumberNearLabel(salesRoot, salesMap.customers),
-      contacted:  getNumberNearLabel(salesRoot, salesMap.contacted),
-      apptsSet:   getNumberNearLabel(salesRoot, salesMap.apptsSet),
-      apptsShown: getNumberNearLabel(salesRoot, salesMap.apptsShown),
-      sold:       getNumberNearLabel(salesRoot, salesMap.sold),
-    };
-
-    const kpis = {
-      unansweredComms: getNumberNearLabel(kpiRoot, kpiMap.unansweredComms),
-      openVisits:      getNumberNearLabel(kpiRoot, kpiMap.openVisits),
-      buyingSignals:   getNumberNearLabel(kpiRoot, kpiMap.buyingSignals),
-      pendingDeals:    getNumberNearLabel(kpiRoot, kpiMap.pendingDeals),
-    };
-
-    // try to grab store name (best effort / optional)
-    let store = "";
-    const storeCand = Array.from(document.querySelectorAll("header *,[id*=dealer],[class*=dealer],[class*=store]"))
-      .find(el => isVisible(el) && /quirk|chevrolet|buick|gmc|kia|volkswagen|vw|dealer/i.test(el.textContent));
-    if (storeCand) store = storeCand.textContent.trim();
-
-    const title = document.title || "Vinconnect";
-    return {
-      url: location.href,
-      title,
-      store,
-      salesFunnel,
-      kpis
-    };
-  }
-
-  // ---------- summary format ----------
-  function makeSummary(payload) {
-    const sf = payload.salesFunnel || {};
-    const kp = payload.kpis || {};
-    const lines = [];
-
-    lines.push(`${payload.title} — Vinconnect ${payload.store ? `| ${payload.store}` : ""}`);
-    lines.push(`Leads:`);
-    lines.push(`  Customers: ${sf.customers ?? 0} | Contacted: ${sf.contacted ?? 0} | Appts Set: ${sf.apptsSet ?? 0} | Shown: ${sf.apptsShown ?? 0} | Sold: ${sf.sold ?? 0}`);
-    lines.push(`KPIs — Unanswered: ${kp.unansweredComms ?? 0} , Open visits: ${kp.openVisits ?? 0} , Buying signals: ${kp.buyingSignals ?? 0} , Pending deals: ${kp.pendingDeals ?? 0}`);
-    lines.push(`URL: ${payload.url}`);
-    return lines.join("\n");
-  }
-
-  // ---------- panel UI ----------
-  function ensurePanel() {
-    if (document.getElementById("quirk-helper-panel")) return;
-
-    const btn = document.createElement("button");
-    btn.id = "quirk-fab";
-    btn.textContent = "Quirk";
-    Object.assign(btn.style, {
-      position: "fixed", right: "24px", bottom: "24px",
-      zIndex: 2147483647, borderRadius: "9999px",
-      width: "56px", height: "56px", border: "0",
-      color: "#fff", background: "#19734a", boxShadow:"0 6px 16px rgba(0,0,0,.25)",
-      fontWeight: 700, cursor: "pointer"
-    });
-
-    const panel = document.createElement("div");
-    panel.id = "quirk-helper-panel";
-    Object.assign(panel.style, {
-      position: "fixed", right: "24px", bottom: "88px",
-      width: "360px", maxHeight: "380px", overflow: "hidden",
-      background: "#fff", color: "#111", borderRadius: "12px",
-      boxShadow: "0 16px 40px rgba(0,0,0,.3)", zIndex: 2147483647,
-      border: "1px solid #e5e7eb", display: "none"
-    });
-
-    panel.innerHTML = `
-      <div style="padding:12px 14px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:8px;">
-        <strong style="font-weight:600;">Quirk Helper</strong>
-        <span style="opacity:.6;font-size:12px;">Vinconnect</span>
-        <div style="flex:1;"></div>
-        <button data-action="scrape" style="background:#0ea5e9;border:0;color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;">Scrape dashboard</button>
-        <button data-action="copy"   style="margin-left:8px;background:#e5e7eb;border:0;border-radius:8px;padding:6px 10px;cursor:pointer;">Copy</button>
-        <button data-action="dl"     style="margin-left:8px;background:#e5e7eb;border:0;border-radius:8px;padding:6px 10px;cursor:pointer;">Download</button>
-      </div>
-      <pre id="quirk-output" style="margin:0;padding:12px;max-height:300px;overflow:auto;font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;background:#0b1220;color:#d1e0ff;border-top:1px solid #e5e7eb;">(idle)</pre>
-    `;
-
-    const headerBtn = panel.querySelector('[data-action="scrape"]');
-    const copyBtn   = panel.querySelector('[data-action="copy"]');
-    const dlBtn     = panel.querySelector('[data-action="dl"]');
-    const out       = panel.querySelector("#quirk-output");
-
-    headerBtn.onclick = async () => {
-      try {
-        out.textContent = "Scraping…";
-        await sleep(50);
-        const payload = scrapeDealerDashboard();
-        const summary = makeSummary(payload);
-        out.textContent = summary;
-
-        // Optional: try local API (shows result or error line)
-        try {
-          const res = await fetch("http://127.0.0.1:8765/summarize", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ payload })
-          });
-          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-          const txt = await res.text();
-          out.textContent = summary + "\n\n---\nLocal API response:\n" + txt;
-        } catch (e) {
-          out.textContent = "Could not reach local API: " + (e.message || "Failed to fetch") + "\n\n" + out.textContent;
-        }
-      } catch (err) {
-        out.textContent = "Error: " + (err?.message || String(err));
-      }
-    };
-
-    copyBtn.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(out.textContent || "");
-        copyBtn.textContent = "Copied!";
-        await sleep(800);
-        copyBtn.textContent = "Copy";
-      } catch {}
-    };
-
-    dlBtn.onclick = () => {
-      const blob = new Blob([out.textContent || ""], { type: "text/plain" });
-      const a = Object.assign(document.createElement("a"), {
-        href: URL.createObjectURL(blob),
-        download: "quirk-dashboard.txt"
-      });
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    };
-
-    btn.onclick = () => {
-      panel.style.display = panel.style.display === "none" ? "block" : "none";
-    };
-
-    document.body.appendChild(btn);
-    document.body.appendChild(panel);
-  }
-
-  // show panel once DOM is ready
-  const ready = () => document.readyState === "interactive" || document.readyState === "complete";
-  const boot = async () => {
-    for (let i = 0; i < 50 && !ready(); i++) await sleep(100);
-    ensurePanel();
-  };
-  boot();
-
-  // Respond to Alt+Q (from background) to toggle panel
-  chrome.runtime.onMessage?.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type === "quirk:toggle") {
-      const panel = document.getElementById("quirk-helper-panel");
-      if (panel) panel.style.display = (panel.style.display === "none") ? "block" : "none";
-      sendResponse?.({ ok: true });
-    }
-    if (msg?.type === "quirk:log") {
-      console.log("[from background]", msg.data);
-      sendResponse?.({ ok: true });
-    }
+  // floating bubble
+  const bubble = el("button", {
+    className: "quirk-bubble",
+    title: "Quirk",
+    innerText: "Quirk"
   });
-})();
-// =====================
-// Quirk AI: suggest reply integration
-// =====================
-(() => {
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const norm = s => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+  Object.assign(bubble.style, {
+    position: "fixed", zIndex: 2147483647, right: "18px", bottom: "18px",
+    width: "48px", height: "48px", borderRadius: "50%",
+    background: "#0ea5e9", color: "#fff", border: "none", fontWeight: 800,
+    boxShadow: "0 6px 18px rgba(0,0,0,.2)", cursor: "pointer"
+  });
 
-  // Heuristics to detect we are in the texting UI (popup or main)
-  function inVinsTextingUI() {
-    const urlOk = /CarDashboard\/Pages\/.*Communication/i.test(location.href)
-               || /LeadManagement\/GenAIHost\.aspx/i.test(location.href);
-    // look for the composer character counter "0/1200" or the native "Suggest Edits" button
-    const counter = Array.from(document.querySelectorAll("*"))
-      .find(el => /\/1200\b/.test(el.textContent || ""));
-    const nativeBtn = Array.from(document.querySelectorAll("button"))
-      .find(b => /suggest edits/i.test(b.textContent || ""));
-    return urlOk || !!counter || !!nativeBtn;
+  // panel
+  modeSpan = el("span", { style: "color:#6b7280;margin-left:.5rem" });
+  pre = el("pre", { style: "margin: .75rem 0 0; max-height: 320px; overflow: auto; background:#0b1220; color:#e5e7eb; padding:.5rem; border-radius:.5rem; font-size:12px;" });
+
+  primaryBtn = el("button", {
+    className: "quirk-primary",
+    textContent: "Scrape dashboard"
+  });
+  Object.assign(primaryBtn.style, {
+    background: "#2563eb", color: "#fff", border: "none",
+    borderRadius: ".5rem", padding: ".5rem .9rem", cursor: "pointer",
+    fontWeight: 600
+  });
+
+  copyBtn = el("button", { textContent: "Copy" });
+  dlBtn = el("button", { textContent: "Download" });
+  for (const b of [copyBtn, dlBtn]) {
+    Object.assign(b.style, {
+      marginLeft: ".5rem", padding: ".5rem .9rem", borderRadius: ".5rem",
+      border: "1px solid #d1d5db", background: "#fff", cursor: "pointer"
+    });
   }
 
-  // Try to find the message compose textarea or editable div
-  function findComposer() {
-    // Common patterns: <textarea>, contenteditable div, or specific class
-    let box = document.querySelector("textarea");
-    if (!box) {
-      box = Array.from(document.querySelectorAll('[contenteditable="true"], div[role="textbox"]'))
-        .find(el => el.offsetHeight > 30 && el.offsetWidth > 200);
-    }
-    return box || null;
+  panel = el("div", {}, 
+    el("div", {
+      style: "position:fixed; right:84px; bottom:18px; width:420px; max-width:calc(100vw - 32px); background:#fff; border:1px solid #e5e7eb; border-radius:.75rem; box-shadow:0 16px 40px rgba(0,0,0,.22); z-index:2147483646; padding:12px;"
+    },
+      el("div", { style:"display:flex; align-items:center; gap:.5rem;" },
+        el("strong", { textContent: "Quirk Helper" }),
+        modeSpan,
+        el("div", { style: "flex:1" }),
+        primaryBtn, copyBtn, dlBtn
+      ),
+      pre
+    )
+  );
+
+  document.documentElement.appendChild(bubble);
+  document.documentElement.appendChild(panel);
+
+  on(bubble, "click", () => {
+    const box = panel.firstElementChild;
+    const cur = getComputedStyle(box).display !== "none";
+    box.style.display = cur ? "none" : "block";
+  });
+
+  // actions
+  on(primaryBtn, "click", async () => {
+    if (currentContext() === "dashboard") await doScrapeDashboard();
+    else if (currentContext() === "chat") await doSuggestEdits();
+    else pre.textContent = "Unknown context. Navigate to a VIN dashboard or the text chat pop-up.";
+  });
+
+  on(copyBtn, "click", () => copyText(pre.innerText));
+  on(dlBtn, "click", () => downloadString(
+    downloadableFilename("quirk-helper"), "text/plain", pre.innerText
+  ));
+
+  // show immediately
+  updateModeLabel();
+}
+
+// ---- context detection ----------------------------------------------------
+function currentContext() {
+  const href = location.href.toLowerCase();
+
+  // VIN “dealer dashboard”
+  if (href.includes("/vinconnect/pane-both/vinconnect-dealer-dashboard")) return "dashboard";
+
+  // VIN texting / communication pop-up (rims2.aspx?urlSettingName=Communication…)
+  if (href.includes("rims2.aspx") && href.includes("urlsettingname=communication")) return "chat";
+
+  // Heuristic: chat popup often has a visible send area (textarea + “Suggest Edits” button)
+  const anyTextArea = document.querySelector("textarea");
+  if (anyTextArea && document.body.innerText.toLowerCase().includes("your conversation will begin")) {
+    return "chat";
   }
 
-  // Extract visible conversation bubbles (last 15)
-  function gatherTranscript(limit = 15) {
-    // Grab generic message bubbles; prefer elements with “Message”, timestamps, or known classes
-    const candidates = Array.from(document.querySelectorAll("*"))
-      .filter(el => {
-        const t = (el.textContent || "").trim();
-        if (!t) return false;
-        // likely message bubble: medium text, not just a button/label
-        const rect = el.getBoundingClientRect();
-        if (rect.height < 16 || rect.width < 120) return false;
-        // crude filter: a lot of bubbles contain short sentences/lines
-        return /[a-z]/i.test(t) && !/^\d{1,2}:\d{2}\s?(AM|PM)?$/.test(t);
+  // fallback: dashboard widgets present?
+  if (document.querySelector("div:has(> div) .kpi, .vinconnect-dashboard, .sales-funnel")) return "dashboard";
+
+  return "unknown";
+}
+
+function updateModeLabel() {
+  const ctx = currentContext();
+  if (!panel) return;
+  if (ctx === "dashboard") {
+    primaryBtn.textContent = "Scrape dashboard";
+    modeSpan.textContent = "Vinconnect";
+  } else if (ctx === "chat") {
+    primaryBtn.textContent = "Suggest edits";
+    modeSpan.textContent = "Vinconnect";
+  } else {
+    primaryBtn.textContent = "Detecting…";
+    modeSpan.textContent = "";
+  }
+}
+
+// ---- DASHBOARD SCRAPER (same idea you already have, kept concise) ---------
+function readInt(el, fallback = null) {
+  if (!el) return fallback;
+  const m = el.textContent.replace(/[, ]+/g, "").match(/-?\d+/);
+  return m ? parseInt(m[0], 10) : fallback;
+}
+
+function findByLabel(container, label) {
+  const lab = Array.from(container.querySelectorAll("*")).find(n =>
+    n.textContent.trim().toLowerCase() === label.toLowerCase()
+  );
+  if (!lab) return null;
+  // number usually in sibling or parent’s prominent box
+  const box = lab.closest("div,li,section") || lab.parentElement;
+  const strongNum = box.querySelector("strong, .kpi-number, .value, .ng-binding");
+  return strongNum || box;
+}
+
+function scrapeDashboard() {
+  const root = document;
+
+  // Sales Funnel row
+  const salesRow = Array.from(root.querySelectorAll("div,section"))
+    .find(n => /sales\s*funnel/i.test(n.textContent));
+
+  const kpiRow = Array.from(root.querySelectorAll("div,section"))
+    .find(n => /key\s*performance\s*indicators/i.test(n.textContent));
+
+  const obj = {
+    url: location.href,
+    title: document.title,
+    store: document.body.innerText.match(/Quirk Chevrolet NH|Quirk Buick GMC NH|Quirk Kia NH|Quirk Volkswagen NH/i)?.[0] || "Vinconnect",
+    dateRange: (() => {
+      const start = document.querySelector('input[type="text"][id*="Start"], input[type="text"][aria-label*="start"]')?.value;
+      const end   = document.querySelector('input[type="text"][id*="End"], input[type="text"][aria-label*="end"]')?.value;
+      return start && end ? `${start} – ${end}` : (document.querySelector("button[title='Today'], .kpi-date")?.textContent || "");
+    })(),
+    salesFunnel: {},
+    kpis: {},
+  };
+
+  // Sales funnel (Customers, Contacted, Appts Set, Appts Shown, Sold)
+  if (salesRow) {
+    obj.salesFunnel.customers   = readInt(findByLabel(salesRow, "Customers"));
+    obj.salesFunnel.contacted   = readInt(findByLabel(salesRow, "Contacted"));
+    obj.salesFunnel.apptsSet    = readInt(findByLabel(salesRow, "Appts Set"));
+    obj.salesFunnel.apptsShown  = readInt(findByLabel(salesRow, "Appts Shown"));
+    obj.salesFunnel.sold        = readInt(findByLabel(salesRow, "Sold"));
+  }
+
+  // KPIs (Unanswered Comms, Open Visits, Buying Signals, Pending Deals)
+  if (kpiRow) {
+    obj.kpis.unansweredComms = readInt(findByLabel(kpiRow, "Unanswered Comms"));
+    obj.kpis.openVisits      = readInt(findByLabel(kpiRow, "Open Visits"));
+    obj.kpis.buyingSignals   = readInt(findByLabel(kpiRow, "Buying Signals"));
+    obj.kpis.pendingDeals    = readInt(findByLabel(kpiRow, "Pending Deals"));
+  }
+
+  return obj;
+}
+
+async function doScrapeDashboard() {
+  pre.textContent = "Scraping dashboard…";
+  await sleep(50);
+  try {
+    const payload = scrapeDashboard();
+    const lines = [
+      `${payload.store} — ${payload.title}`,
+      `Leads:`,
+      `  Customers: ${payload.salesFunnel.customers ?? "—"}`,
+      `  Contacted: ${payload.salesFunnel.contacted ?? "—"}`,
+      `  Appts Set: ${payload.salesFunnel.apptsSet ?? "—"}`,
+      `  Shown: ${payload.salesFunnel.apptsShown ?? "—"}`,
+      `  Sold: ${payload.salesFunnel.sold ?? "—"}`,
+      `KPIs — Unanswered: ${payload.kpis.unansweredComms ?? "—"}, Open visits: ${payload.kpis.openVisits ?? "—"}, Buying signals: ${payload.kpis.buyingSignals ?? "—"}, Pending deals: ${payload.kpis.pendingDeals ?? "—"}`,
+      `URL: ${payload.url}`
+    ];
+    pre.textContent = lines.join("\n");
+  } catch (err) {
+    pre.textContent = `Dashboard scrape error: ${String(err)}`;
+  }
+}
+
+// ---- CHAT SCRAPER + SUGGESTIONS ------------------------------------------
+/**
+ * Try hard to extract the visible conversation from the text pop-up.
+ * We intentionally use several selector strategies; whichever hits first wins.
+ */
+function scrapeChatConversation() {
+  // Strategy 1: big scrolling area above the reply box
+  const ta = document.querySelector("textarea");
+  let scrollArea = null;
+  if (ta) {
+    let p = ta.parentElement;
+    for (let i = 0; i < 6 && p; i++) {
+      scrollArea = scrollArea || Array.from(p.children).find(n => {
+        const s = getComputedStyle(n);
+        return (s.overflowY === "auto" || s.overflowY === "scroll") && n.innerText && n.innerText.length > 40;
       });
-
-    // Deduplicate by text & sort by DOM order (already in document order)
-    const dedup = [];
-    const seen = new Set();
-    for (const el of candidates) {
-      const t = el.textContent.trim();
-      if (t.length < 2 || t.length > 1200) continue;
-      const key = t.slice(0, 200);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      dedup.push(el);
+      p = p.parentElement;
     }
-
-    // Take the last N visible-ish items as transcript, try to identify speaker
-    const last = dedup.slice(-limit);
-    const messages = last.map(el => {
-      const txt = el.textContent.trim().replace(/\s+/g, " ");
-      // Heuristic: blue bubbles (agent) vs gray (customer) isn't reliable; fallback on “By:”
-      const raw = txt.toLowerCase();
-      let role = raw.includes("by:") || raw.includes("sent to:") ? "agent" : "customer";
-      return { role, content: txt };
-    });
-
-    // Remove obvious UI strings
-    return messages.filter(m => !/suggest edits|0\/1200/.test(m.content.toLowerCase()));
   }
 
-  // Mount our “Quirk Suggest” button next to the composer
-  async function mountQuirkSuggest() {
-    if (!inVinsTextingUI()) return;
-    const composer = findComposer();
-    if (!composer) return;
+  // Strategy 2: generic “message bubbles”
+  const bubbleSel = [
+    ".message-bubble", ".msg-bubble", ".bubble", ".message-item", ".k-message", "[class*='message'] [class*='text']"
+  ];
+  const bubbles = bubbleSel.flatMap(sel => Array.from(document.querySelectorAll(sel)));
+  const bubbleText = bubbles.map(b => b.innerText.trim()).filter(Boolean);
 
-    // Avoid duplicates
-    if (document.getElementById("quirk-suggest-btn")) return;
+  let text = "";
+  if (scrollArea) text = scrollArea.innerText;
+  else if (bubbleText.length >= 3) text = bubbleText.join("\n\n");
+  else text = document.body.innerText; // worst case
 
-    const bar = composer.closest("form") || composer.parentElement;
-    if (!bar) return;
+  // Trim very long content
+  text = text.replace(/\u00a0/g, " ").replace(/\r/g, "");
+  if (text.length > MAX_CHAT_CHARS) {
+    text = text.slice(-MAX_CHAT_CHARS);
+  }
 
-    const btn = document.createElement("button");
-    btn.id = "quirk-suggest-btn";
-    btn.type = "button";
-    btn.textContent = "Quirk Suggest";
-    Object.assign(btn.style, {
-      marginLeft: "8px",
-      padding: "6px 10px",
-      borderRadius: "8px",
-      border: "0",
-      background: "#166534",
-      color: "#fff",
-      cursor: "pointer",
-      fontWeight: 600
-    });
+  // Dealer & customer best-effort names (optional)
+  const storeMatch = document.body.innerText.match(/Quirk [^\n|]+/i);
+  const customerMatch = document.body.innerText.match(/Customer:\s*([^\n]+)/i);
 
-    // Try to place next to native "Suggest Edits" if present
-    const nativeBtn = Array.from(document.querySelectorAll("button"))
-      .find(b => /suggest edits/i.test(b.textContent || ""));
-    if (nativeBtn && nativeBtn.parentElement) {
-      nativeBtn.parentElement.insertBefore(btn, nativeBtn.nextSibling);
+  return {
+    url: location.href,
+    dealership: storeMatch ? storeMatch[0] : "Vinconnect",
+    customer: customerMatch ? customerMatch[1].trim() : "",
+    conversation: text.trim()
+  };
+}
+
+async function callLocalSuggestions(payload) {
+  // Try /suggest first
+  let res = await fetchJSON(`${API_BASE}/suggest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (res.ok) return res.data;
+
+  // Fallback to /summarize (send a friendly envelope)
+  const fallback = await fetchJSON(`${API_BASE}/summarize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ payload })
+  });
+  if (fallback.ok) return fallback.data;
+
+  throw new Error(`Local API error (${res.status} then ${fallback.status})`);
+}
+
+async function doSuggestEdits() {
+  const ctx = scrapeChatConversation();
+  if (!ctx.conversation || ctx.conversation.length < 20) {
+    pre.textContent = "Could not find enough conversation text on this page.";
+    return;
+  }
+  pre.textContent = "Asking Quirk AI for suggested replies…";
+
+  try {
+    const result = await callLocalSuggestions(ctx);
+    // If server returns JSON with {suggestions:[...]} print nicely; else print raw
+    if (typeof result === "object" && result && Array.isArray(result.suggestions)) {
+      pre.textContent = result.suggestions.map((s, i) => `#${i + 1}\n${s}\n`).join("\n");
     } else {
-      bar.appendChild(btn);
+      pre.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2);
     }
-
-    btn.onclick = async () => {
-      try {
-        btn.disabled = true;
-        btn.textContent = "Thinking…";
-
-        const transcript = gatherTranscript(15);
-        const storeName = (document.querySelector("header,[data-store]")?.textContent || "").trim();
-        const pageTitle = document.title || "Vinconnect";
-
-        const payload = {
-          store: storeName,
-          title: pageTitle,
-          url: location.href,
-          messages: transcript
-        };
-
-        // Call local API
-        const res = await fetch("http://127.0.0.1:8765/suggest", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const data = await res.json();
-
-        const suggestion = data?.reply || data?.suggestion || "";
-        if (!suggestion) throw new Error("Empty suggestion");
-
-        // Insert into composer
-        if (composer.tagName === "TEXTAREA") {
-          composer.value = suggestion;
-          composer.dispatchEvent(new Event("input", { bubbles: true }));
-        } else if (composer.isContentEditable) {
-          composer.innerText = suggestion;
-          composer.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        btn.textContent = "Inserted ✓";
-        await sleep(900);
-        btn.textContent = "Quirk Suggest";
-      } catch (e) {
-        btn.textContent = "Error – retry";
-        console.warn("Quirk Suggest error:", e);
-        await sleep(1200);
-        btn.textContent = "Quirk Suggest";
-      } finally {
-        btn.disabled = false;
-      }
-    };
+  } catch (err) {
+    pre.textContent = `Could not reach local API: ${String(err).replace(/^Error:\s*/, "")}`;
   }
+}
 
-  // Observe DOM changes (handles popups, SPA nav)
-  const obs = new MutationObserver(() => {
-    mountQuirkSuggest();
-  });
-  obs.observe(document.documentElement, { subtree: true, childList: true });
+// ---- init -----------------------------------------------------------------
+(function init() {
+  try { mountUI(); updateModeLabel(); }
+  catch (e) { /* no-op */ }
 
-  // First attempt after load
-  (async () => {
-    for (let i = 0; i < 40; i++) { // ~4s
-      await sleep(100);
-      try { await mountQuirkSuggest(); if (document.getElementById("quirk-suggest-btn")) break; } catch {}
+  // Respond to SPA navigations / pop-up lifetime
+  let lastHref = location.href;
+  setInterval(() => {
+    if (location.href !== lastHref) {
+      lastHref = location.href;
+      updateModeLabel();
     }
-  })();
+  }, 600);
+
+  // A small delay helps in heavy pages
+  setTimeout(updateModeLabel, 800);
 })();
