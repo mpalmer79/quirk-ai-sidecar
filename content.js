@@ -307,3 +307,173 @@
     }
   });
 })();
+// =====================
+// Quirk AI: suggest reply integration
+// =====================
+(() => {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const norm = s => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+  // Heuristics to detect we are in the texting UI (popup or main)
+  function inVinsTextingUI() {
+    const urlOk = /CarDashboard\/Pages\/.*Communication/i.test(location.href)
+               || /LeadManagement\/GenAIHost\.aspx/i.test(location.href);
+    // look for the composer character counter "0/1200" or the native "Suggest Edits" button
+    const counter = Array.from(document.querySelectorAll("*"))
+      .find(el => /\/1200\b/.test(el.textContent || ""));
+    const nativeBtn = Array.from(document.querySelectorAll("button"))
+      .find(b => /suggest edits/i.test(b.textContent || ""));
+    return urlOk || !!counter || !!nativeBtn;
+  }
+
+  // Try to find the message compose textarea or editable div
+  function findComposer() {
+    // Common patterns: <textarea>, contenteditable div, or specific class
+    let box = document.querySelector("textarea");
+    if (!box) {
+      box = Array.from(document.querySelectorAll('[contenteditable="true"], div[role="textbox"]'))
+        .find(el => el.offsetHeight > 30 && el.offsetWidth > 200);
+    }
+    return box || null;
+  }
+
+  // Extract visible conversation bubbles (last 15)
+  function gatherTranscript(limit = 15) {
+    // Grab generic message bubbles; prefer elements with “Message”, timestamps, or known classes
+    const candidates = Array.from(document.querySelectorAll("*"))
+      .filter(el => {
+        const t = (el.textContent || "").trim();
+        if (!t) return false;
+        // likely message bubble: medium text, not just a button/label
+        const rect = el.getBoundingClientRect();
+        if (rect.height < 16 || rect.width < 120) return false;
+        // crude filter: a lot of bubbles contain short sentences/lines
+        return /[a-z]/i.test(t) && !/^\d{1,2}:\d{2}\s?(AM|PM)?$/.test(t);
+      });
+
+    // Deduplicate by text & sort by DOM order (already in document order)
+    const dedup = [];
+    const seen = new Set();
+    for (const el of candidates) {
+      const t = el.textContent.trim();
+      if (t.length < 2 || t.length > 1200) continue;
+      const key = t.slice(0, 200);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedup.push(el);
+    }
+
+    // Take the last N visible-ish items as transcript, try to identify speaker
+    const last = dedup.slice(-limit);
+    const messages = last.map(el => {
+      const txt = el.textContent.trim().replace(/\s+/g, " ");
+      // Heuristic: blue bubbles (agent) vs gray (customer) isn't reliable; fallback on “By:”
+      const raw = txt.toLowerCase();
+      let role = raw.includes("by:") || raw.includes("sent to:") ? "agent" : "customer";
+      return { role, content: txt };
+    });
+
+    // Remove obvious UI strings
+    return messages.filter(m => !/suggest edits|0\/1200/.test(m.content.toLowerCase()));
+  }
+
+  // Mount our “Quirk Suggest” button next to the composer
+  async function mountQuirkSuggest() {
+    if (!inVinsTextingUI()) return;
+    const composer = findComposer();
+    if (!composer) return;
+
+    // Avoid duplicates
+    if (document.getElementById("quirk-suggest-btn")) return;
+
+    const bar = composer.closest("form") || composer.parentElement;
+    if (!bar) return;
+
+    const btn = document.createElement("button");
+    btn.id = "quirk-suggest-btn";
+    btn.type = "button";
+    btn.textContent = "Quirk Suggest";
+    Object.assign(btn.style, {
+      marginLeft: "8px",
+      padding: "6px 10px",
+      borderRadius: "8px",
+      border: "0",
+      background: "#166534",
+      color: "#fff",
+      cursor: "pointer",
+      fontWeight: 600
+    });
+
+    // Try to place next to native "Suggest Edits" if present
+    const nativeBtn = Array.from(document.querySelectorAll("button"))
+      .find(b => /suggest edits/i.test(b.textContent || ""));
+    if (nativeBtn && nativeBtn.parentElement) {
+      nativeBtn.parentElement.insertBefore(btn, nativeBtn.nextSibling);
+    } else {
+      bar.appendChild(btn);
+    }
+
+    btn.onclick = async () => {
+      try {
+        btn.disabled = true;
+        btn.textContent = "Thinking…";
+
+        const transcript = gatherTranscript(15);
+        const storeName = (document.querySelector("header,[data-store]")?.textContent || "").trim();
+        const pageTitle = document.title || "Vinconnect";
+
+        const payload = {
+          store: storeName,
+          title: pageTitle,
+          url: location.href,
+          messages: transcript
+        };
+
+        // Call local API
+        const res = await fetch("http://127.0.0.1:8765/suggest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+
+        const suggestion = data?.reply || data?.suggestion || "";
+        if (!suggestion) throw new Error("Empty suggestion");
+
+        // Insert into composer
+        if (composer.tagName === "TEXTAREA") {
+          composer.value = suggestion;
+          composer.dispatchEvent(new Event("input", { bubbles: true }));
+        } else if (composer.isContentEditable) {
+          composer.innerText = suggestion;
+          composer.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        btn.textContent = "Inserted ✓";
+        await sleep(900);
+        btn.textContent = "Quirk Suggest";
+      } catch (e) {
+        btn.textContent = "Error – retry";
+        console.warn("Quirk Suggest error:", e);
+        await sleep(1200);
+        btn.textContent = "Quirk Suggest";
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  }
+
+  // Observe DOM changes (handles popups, SPA nav)
+  const obs = new MutationObserver(() => {
+    mountQuirkSuggest();
+  });
+  obs.observe(document.documentElement, { subtree: true, childList: true });
+
+  // First attempt after load
+  (async () => {
+    for (let i = 0; i < 40; i++) { // ~4s
+      await sleep(100);
+      try { await mountQuirkSuggest(); if (document.getElementById("quirk-suggest-btn")) break; } catch {}
+    }
+  })();
+})();
