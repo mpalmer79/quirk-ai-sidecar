@@ -1,12 +1,12 @@
-// content.js  — Quirk AI Sidecar (dashboard + chat helper)
-// --------------------------------------------------------
+// content.js  — Quirk AI Sidecar
+// Dashboard summary + Chat "Suggest edits" with one-click insert.
 
-// ---- config ---------------------------------------------------------------
+// ---------- CONFIG ----------
 const API_BASE = "http://127.0.0.1:8765";
 const FETCH_TIMEOUT_MS = 15000;
 const MAX_CHAT_CHARS = 4000;
 
-// ---- small utils ----------------------------------------------------------
+// ---------- UTILS ----------
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function el(tag, props = {}, ...kids) {
@@ -24,18 +24,12 @@ async function fetchJSON(url, opts) {
   try {
     const res = await fetch(url, { ...opts, signal: ctl.signal });
     const txt = await res.text();
-    // Try JSON; if it's plain text, wrap it.
     try { return { ok: res.ok, status: res.status, data: JSON.parse(txt) }; }
     catch { return { ok: res.ok, status: res.status, data: txt }; }
   } finally { clearTimeout(t); }
 }
 
 function copyText(s) { navigator.clipboard.writeText(s).catch(()=>{}); }
-
-function downloadableFilename(prefix, ext = "txt") {
-  const t = new Date().toISOString().replace(/[:.]/g, "-");
-  return `${prefix}-${t}.${ext}`;
-}
 
 function downloadString(name, mime, content) {
   const blob = new Blob([content], { type: mime });
@@ -44,13 +38,25 @@ function downloadString(name, mime, content) {
   URL.revokeObjectURL(a.href);
 }
 
-// ---- mount floating bubble + panel ---------------------------------------
-let panel, pre, primaryBtn, copyBtn, dlBtn, modeSpan;
+function downloadableFilename(prefix, ext = "txt") {
+  const t = new Date().toISOString().replace(/[:.]/g, "-");
+  return `${prefix}-${t}.${ext}`;
+}
+
+function isVisible(node) {
+  if (!node) return false;
+  const s = getComputedStyle(node);
+  if (s.visibility === "hidden" || s.display === "none") return false;
+  const r = node.getBoundingClientRect();
+  return r.width > 4 && r.height > 4;
+}
+
+// ---------- UI MOUNT ----------
+let panel, pre, primaryBtn, copyBtn, dlBtn, modeSpan, sugBox;
 
 function mountUI() {
   if (panel) return;
 
-  // floating bubble
   const bubble = el("button", {
     className: "quirk-bubble",
     title: "Quirk",
@@ -63,18 +69,19 @@ function mountUI() {
     boxShadow: "0 6px 18px rgba(0,0,0,.2)", cursor: "pointer"
   });
 
-  // panel
   modeSpan = el("span", { style: "color:#6b7280;margin-left:.5rem" });
-  pre = el("pre", { style: "margin: .75rem 0 0; max-height: 320px; overflow: auto; background:#0b1220; color:#e5e7eb; padding:.5rem; border-radius:.5rem; font-size:12px;" });
 
-  primaryBtn = el("button", {
-    className: "quirk-primary",
-    textContent: "Scrape dashboard"
+  pre = el("pre", {
+    style: "margin:.75rem 0 0; max-height: 280px; overflow:auto; " +
+           "background:#0b1220; color:#e5e7eb; padding:.5rem; border-radius:.5rem; font-size:12px;"
   });
+
+  sugBox = el("div", { style: "margin-top:.5rem; display:none; gap:.5rem; flex-direction:column;" });
+
+  primaryBtn = el("button", { textContent: "Scrape dashboard" });
   Object.assign(primaryBtn.style, {
     background: "#2563eb", color: "#fff", border: "none",
-    borderRadius: ".5rem", padding: ".5rem .9rem", cursor: "pointer",
-    fontWeight: 600
+    borderRadius: ".5rem", padding: ".5rem .9rem", cursor: "pointer", fontWeight: 600
   });
 
   copyBtn = el("button", { textContent: "Copy" });
@@ -86,9 +93,11 @@ function mountUI() {
     });
   }
 
-  panel = el("div", {}, 
+  panel = el("div", {},
     el("div", {
-      style: "position:fixed; right:84px; bottom:18px; width:420px; max-width:calc(100vw - 32px); background:#fff; border:1px solid #e5e7eb; border-radius:.75rem; box-shadow:0 16px 40px rgba(0,0,0,.22); z-index:2147483646; padding:12px;"
+      style: "position:fixed; right:84px; bottom:18px; width:420px; max-width:calc(100vw - 32px);" +
+             "background:#fff; border:1px solid #e5e7eb; border-radius:.75rem; box-shadow:0 16px 40px rgba(0,0,0,.22);" +
+             "z-index:2147483646; padding:12px;"
     },
       el("div", { style:"display:flex; align-items:center; gap:.5rem;" },
         el("strong", { textContent: "Quirk Helper" }),
@@ -96,7 +105,8 @@ function mountUI() {
         el("div", { style: "flex:1" }),
         primaryBtn, copyBtn, dlBtn
       ),
-      pre
+      pre,
+      sugBox
     )
   );
 
@@ -109,11 +119,10 @@ function mountUI() {
     box.style.display = cur ? "none" : "block";
   });
 
-  // actions
   on(primaryBtn, "click", async () => {
     if (currentContext() === "dashboard") await doScrapeDashboard();
     else if (currentContext() === "chat") await doSuggestEdits();
-    else pre.textContent = "Unknown context. Navigate to a VIN dashboard or the text chat pop-up.";
+    else pre.textContent = "Unknown context. Open dealer dashboard or the VIN text pop-up.";
   });
 
   on(copyBtn, "click", () => copyText(pre.innerText));
@@ -121,27 +130,18 @@ function mountUI() {
     downloadableFilename("quirk-helper"), "text/plain", pre.innerText
   ));
 
-  // show immediately
   updateModeLabel();
 }
 
-// ---- context detection ----------------------------------------------------
+// ---------- CONTEXT ----------
 function currentContext() {
   const href = location.href.toLowerCase();
-
-  // VIN “dealer dashboard”
   if (href.includes("/vinconnect/pane-both/vinconnect-dealer-dashboard")) return "dashboard";
-
-  // VIN texting / communication pop-up (rims2.aspx?urlSettingName=Communication…)
   if (href.includes("rims2.aspx") && href.includes("urlsettingname=communication")) return "chat";
 
-  // Heuristic: chat popup often has a visible send area (textarea + “Suggest Edits” button)
-  const anyTextArea = document.querySelector("textarea");
-  if (anyTextArea && document.body.innerText.toLowerCase().includes("your conversation will begin")) {
-    return "chat";
-  }
+  const ta = document.querySelector("textarea");
+  if (ta && document.body.innerText.toLowerCase().includes("your conversation will begin")) return "chat";
 
-  // fallback: dashboard widgets present?
   if (document.querySelector("div:has(> div) .kpi, .vinconnect-dashboard, .sales-funnel")) return "dashboard";
 
   return "unknown";
@@ -150,6 +150,7 @@ function currentContext() {
 function updateModeLabel() {
   const ctx = currentContext();
   if (!panel) return;
+  sugBox.style.display = "none";
   if (ctx === "dashboard") {
     primaryBtn.textContent = "Scrape dashboard";
     modeSpan.textContent = "Vinconnect";
@@ -162,38 +163,31 @@ function updateModeLabel() {
   }
 }
 
-// ---- DASHBOARD SCRAPER (same idea you already have, kept concise) ---------
+// ---------- DASHBOARD SCRAPE ----------
 function readInt(el, fallback = null) {
   if (!el) return fallback;
   const m = el.textContent.replace(/[, ]+/g, "").match(/-?\d+/);
   return m ? parseInt(m[0], 10) : fallback;
 }
-
 function findByLabel(container, label) {
   const lab = Array.from(container.querySelectorAll("*")).find(n =>
     n.textContent.trim().toLowerCase() === label.toLowerCase()
   );
   if (!lab) return null;
-  // number usually in sibling or parent’s prominent box
   const box = lab.closest("div,li,section") || lab.parentElement;
-  const strongNum = box.querySelector("strong, .kpi-number, .value, .ng-binding");
-  return strongNum || box;
+  return box.querySelector("strong, .kpi-number, .value, .ng-binding") || box;
 }
-
 function scrapeDashboard() {
   const root = document;
-
-  // Sales Funnel row
   const salesRow = Array.from(root.querySelectorAll("div,section"))
     .find(n => /sales\s*funnel/i.test(n.textContent));
-
   const kpiRow = Array.from(root.querySelectorAll("div,section"))
     .find(n => /key\s*performance\s*indicators/i.test(n.textContent));
 
   const obj = {
     url: location.href,
     title: document.title,
-    store: document.body.innerText.match(/Quirk Chevrolet NH|Quirk Buick GMC NH|Quirk Kia NH|Quirk Volkswagen NH/i)?.[0] || "Vinconnect",
+    store: document.body.innerText.match(/Quirk [^\n|]+/i)?.[0] || "Vinconnect",
     dateRange: (() => {
       const start = document.querySelector('input[type="text"][id*="Start"], input[type="text"][aria-label*="start"]')?.value;
       const end   = document.querySelector('input[type="text"][id*="End"], input[type="text"][aria-label*="end"]')?.value;
@@ -203,7 +197,6 @@ function scrapeDashboard() {
     kpis: {},
   };
 
-  // Sales funnel (Customers, Contacted, Appts Set, Appts Shown, Sold)
   if (salesRow) {
     obj.salesFunnel.customers   = readInt(findByLabel(salesRow, "Customers"));
     obj.salesFunnel.contacted   = readInt(findByLabel(salesRow, "Contacted"));
@@ -211,33 +204,30 @@ function scrapeDashboard() {
     obj.salesFunnel.apptsShown  = readInt(findByLabel(salesRow, "Appts Shown"));
     obj.salesFunnel.sold        = readInt(findByLabel(salesRow, "Sold"));
   }
-
-  // KPIs (Unanswered Comms, Open Visits, Buying Signals, Pending Deals)
   if (kpiRow) {
     obj.kpis.unansweredComms = readInt(findByLabel(kpiRow, "Unanswered Comms"));
     obj.kpis.openVisits      = readInt(findByLabel(kpiRow, "Open Visits"));
     obj.kpis.buyingSignals   = readInt(findByLabel(kpiRow, "Buying Signals"));
     obj.kpis.pendingDeals    = readInt(findByLabel(kpiRow, "Pending Deals"));
   }
-
   return obj;
 }
-
 async function doScrapeDashboard() {
+  sugBox.style.display = "none";
   pre.textContent = "Scraping dashboard…";
   await sleep(50);
   try {
-    const payload = scrapeDashboard();
+    const p = scrapeDashboard();
     const lines = [
-      `${payload.store} — ${payload.title}`,
+      `${p.store} — ${p.title}`,
       `Leads:`,
-      `  Customers: ${payload.salesFunnel.customers ?? "—"}`,
-      `  Contacted: ${payload.salesFunnel.contacted ?? "—"}`,
-      `  Appts Set: ${payload.salesFunnel.apptsSet ?? "—"}`,
-      `  Shown: ${payload.salesFunnel.apptsShown ?? "—"}`,
-      `  Sold: ${payload.salesFunnel.sold ?? "—"}`,
-      `KPIs — Unanswered: ${payload.kpis.unansweredComms ?? "—"}, Open visits: ${payload.kpis.openVisits ?? "—"}, Buying signals: ${payload.kpis.buyingSignals ?? "—"}, Pending deals: ${payload.kpis.pendingDeals ?? "—"}`,
-      `URL: ${payload.url}`
+      `  Customers: ${p.salesFunnel.customers ?? "—"}`,
+      `  Contacted: ${p.salesFunnel.contacted ?? "—"}`,
+      `  Appts Set: ${p.salesFunnel.apptsSet ?? "—"}`,
+      `  Shown: ${p.salesFunnel.apptsShown ?? "—"}`,
+      `  Sold: ${p.salesFunnel.sold ?? "—"}`,
+      `KPIs — Unanswered: ${p.kpis.unansweredComms ?? "—"}, Open visits: ${p.kpis.openVisits ?? "—"}, Buying signals: ${p.kpis.buyingSignals ?? "—"}, Pending deals: ${p.kpis.pendingDeals ?? "—"}`,
+      `URL: ${p.url}`
     ];
     pre.textContent = lines.join("\n");
   } catch (err) {
@@ -245,13 +235,9 @@ async function doScrapeDashboard() {
   }
 }
 
-// ---- CHAT SCRAPER + SUGGESTIONS ------------------------------------------
-/**
- * Try hard to extract the visible conversation from the text pop-up.
- * We intentionally use several selector strategies; whichever hits first wins.
- */
+// ---------- CHAT SCRAPE + SUGGESTIONS ----------
 function scrapeChatConversation() {
-  // Strategy 1: big scrolling area above the reply box
+  // try the scroll area above the reply box
   const ta = document.querySelector("textarea");
   let scrollArea = null;
   if (ta) {
@@ -264,26 +250,19 @@ function scrapeChatConversation() {
       p = p.parentElement;
     }
   }
-
-  // Strategy 2: generic “message bubbles”
-  const bubbleSel = [
-    ".message-bubble", ".msg-bubble", ".bubble", ".message-item", ".k-message", "[class*='message'] [class*='text']"
-  ];
+  // generic bubbles
+  const bubbleSel = [ ".message-bubble", ".msg-bubble", ".bubble", ".message-item", ".k-message", "[class*='message'] [class*='text']" ];
   const bubbles = bubbleSel.flatMap(sel => Array.from(document.querySelectorAll(sel)));
   const bubbleText = bubbles.map(b => b.innerText.trim()).filter(Boolean);
 
   let text = "";
   if (scrollArea) text = scrollArea.innerText;
   else if (bubbleText.length >= 3) text = bubbleText.join("\n\n");
-  else text = document.body.innerText; // worst case
+  else text = document.body.innerText;
 
-  // Trim very long content
   text = text.replace(/\u00a0/g, " ").replace(/\r/g, "");
-  if (text.length > MAX_CHAT_CHARS) {
-    text = text.slice(-MAX_CHAT_CHARS);
-  }
+  if (text.length > MAX_CHAT_CHARS) text = text.slice(-MAX_CHAT_CHARS);
 
-  // Dealer & customer best-effort names (optional)
   const storeMatch = document.body.innerText.match(/Quirk [^\n|]+/i);
   const customerMatch = document.body.innerText.match(/Customer:\s*([^\n]+)/i);
 
@@ -296,7 +275,6 @@ function scrapeChatConversation() {
 }
 
 async function callLocalSuggestions(payload) {
-  // Try /suggest first
   let res = await fetchJSON(`${API_BASE}/suggest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -304,44 +282,143 @@ async function callLocalSuggestions(payload) {
   });
   if (res.ok) return res.data;
 
-  // Fallback to /summarize (send a friendly envelope)
-  const fallback = await fetchJSON(`${API_BASE}/summarize`, {
+  const fb = await fetchJSON(`${API_BASE}/summarize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ payload })
   });
-  if (fallback.ok) return fallback.data;
+  if (fb.ok) return fb.data;
 
-  throw new Error(`Local API error (${res.status} then ${fallback.status})`);
+  throw new Error(`Local API error (${res.status} then ${fb.status})`);
+}
+
+// ---- editor detection + insert
+function findReplyEditor() {
+  // 1) visible textarea
+  const ta = Array.from(document.querySelectorAll("textarea")).find(isVisible);
+  if (ta) return { kind: "textarea", el: ta };
+
+  // 2) contenteditable
+  const ce = Array.from(document.querySelectorAll('[contenteditable="true"]')).find(isVisible);
+  if (ce) return { kind: "contenteditable", el: ce };
+
+  // 3) input[type=text] fallback
+  const inp = Array.from(document.querySelectorAll('input[type="text"], input[type="search"]')).find(isVisible);
+  if (inp) return { kind: "input", el: inp };
+
+  return null;
+}
+
+function dispatchInput(el) {
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function insertTextIntoEditor(text) {
+  const ed = findReplyEditor();
+  if (!ed) {
+    pre.textContent += "\n[!] Could not locate the reply box to insert text.";
+    return false;
+  }
+  const { kind, el } = ed;
+
+  if (kind === "textarea" || kind === "input") {
+    el.focus();
+    el.value = text;
+    // place caret at end
+    try { el.setSelectionRange(el.value.length, el.value.length); } catch {}
+    dispatchInput(el);
+    return true;
+  }
+
+  if (kind === "contenteditable") {
+    el.focus();
+    // try execCommand; fallback to plain set
+    const ok = document.execCommand?.("selectAll", false, null);
+    if (ok) document.execCommand("insertText", false, text);
+    else {
+      el.innerText = text;
+    }
+    dispatchInput(el);
+    return true;
+  }
+
+  return false;
+}
+
+// ---- render suggestions as clickable cards
+function normalizeSuggestions(result) {
+  if (Array.isArray(result?.suggestions)) {
+    return result.suggestions.map(s => String(s)).filter(s => s.trim());
+  }
+  if (typeof result === "string") {
+    // Best effort split into 2–5 suggestions.
+    const parts = result.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+    return parts.length ? parts.slice(0, 5) : [result];
+  }
+  return [JSON.stringify(result, null, 2)];
+}
+
+function renderSuggestions(arr) {
+  sugBox.innerHTML = "";
+  sugBox.style.display = "flex";
+  pre.textContent = "Click a suggestion to insert it into the reply box:";
+
+  arr.forEach((s, i) => {
+    const card = el("div", { style: "border:1px solid #e5e7eb; border-radius:.5rem; padding:.5rem; background:#fafafa;" });
+    const txt = el("div", { textContent: s, style: "white-space:pre-wrap; font-size:13px; line-height:1.35;" });
+    const row = el("div", { style: "margin-top:.5rem; display:flex; gap:.5rem; justify-content:flex-end;" });
+
+    const ins = el("button", { textContent: "Insert" });
+    const cpy = el("button", { textContent: "Copy" });
+    for (const b of [ins, cpy]) {
+      Object.assign(b.style, {
+        padding: ".35rem .7rem", borderRadius: ".5rem", cursor: "pointer",
+        border: "1px solid #d1d5db", background: "#fff"
+      });
+    }
+    Object.assign(ins.style, { background:"#2563eb", color:"#fff", border:"none" });
+
+    on(card, "click", (e) => {
+      // clicking anywhere in card inserts too (except the Copy button which stops propagation)
+      if (e.target === cpy) return;
+      insertTextIntoEditor(s);
+    });
+    on(ins, "click", (e) => { e.stopPropagation(); insertTextIntoEditor(s); });
+    on(cpy, "click", (e) => { e.stopPropagation(); copyText(s); });
+
+    row.append(ins, cpy);
+    card.append(txt, row);
+    sugBox.append(card);
+  });
 }
 
 async function doSuggestEdits() {
   const ctx = scrapeChatConversation();
   if (!ctx.conversation || ctx.conversation.length < 20) {
+    sugBox.style.display = "none";
     pre.textContent = "Could not find enough conversation text on this page.";
     return;
   }
+  sugBox.style.display = "none";
   pre.textContent = "Asking Quirk AI for suggested replies…";
 
   try {
     const result = await callLocalSuggestions(ctx);
-    // If server returns JSON with {suggestions:[...]} print nicely; else print raw
-    if (typeof result === "object" && result && Array.isArray(result.suggestions)) {
-      pre.textContent = result.suggestions.map((s, i) => `#${i + 1}\n${s}\n`).join("\n");
-    } else {
-      pre.textContent = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-    }
+    const suggestions = normalizeSuggestions(result);
+    // also put the list into pre so global Copy/Download work
+    pre.textContent = suggestions.map((s, i) => `#${i + 1}\n${s}\n`).join("\n");
+    renderSuggestions(suggestions);
   } catch (err) {
+    sugBox.style.display = "none";
     pre.textContent = `Could not reach local API: ${String(err).replace(/^Error:\s*/, "")}`;
   }
 }
 
-// ---- init -----------------------------------------------------------------
+// ---------- INIT ----------
 (function init() {
-  try { mountUI(); updateModeLabel(); }
-  catch (e) { /* no-op */ }
+  try { mountUI(); updateModeLabel(); } catch {}
 
-  // Respond to SPA navigations / pop-up lifetime
   let lastHref = location.href;
   setInterval(() => {
     if (location.href !== lastHref) {
@@ -350,6 +427,5 @@ async function doSuggestEdits() {
     }
   }, 600);
 
-  // A small delay helps in heavy pages
   setTimeout(updateModeLabel, 800);
 })();
