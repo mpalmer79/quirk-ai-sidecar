@@ -327,3 +327,178 @@ CLOSE
   // Expose for DevTools
   window.quirkSidecar = { toggle: togglePanel, open: ensurePanel };
 })();
+// ===== Quirk Dashboard Scraper =====
+(() => {
+  const ON_DASH = /vinconnect\/.*dealer-dashboard/i.test(location.href);
+  if (!ON_DASH) return;
+
+  function getText(el){ return el?.textContent?.trim() ?? ""; }
+
+  function getDealer() {
+    const t = document.body.innerText || "";
+    // Top-right usually shows: "Quirk Chevrolet NH #17508"
+    const line = (t.match(/Quirk.*?#\s*\d+/) || [])[0] || "";
+    const idMatch = line.match(/#\s*(\d+)/);
+    return {
+      dealerName: line.replace(/#\s*\d+.*/, "").trim() || null,
+      dealerId: idMatch ? idMatch[1] : null
+    };
+  }
+
+  function getDateRange() {
+    const start = document.querySelector('input[aria-label="Start date"], input[id*="start"]')?.value || null;
+    const end   = document.querySelector('input[aria-label="End date"],   input[id*="end"]')?.value || null;
+    return { start, end };
+  }
+
+  // helpers to find a card by visible label and return the first integer inside it
+  function numberFrom(el) {
+    const m = getText(el).replace(/,/g, "").match(/-?\d+/);
+    return m ? parseInt(m[0], 10) : null;
+  }
+  function findCardByLabel(root, label) {
+    return Array.from(root.querySelectorAll("*"))
+      .find(n => getText(n).toLowerCase() === label.toLowerCase());
+  }
+
+  function scrapeSalesFunnel() {
+    // Card titled "Sales Funnel"
+    const card = Array.from(document.querySelectorAll("div,section"))
+      .find(x => /sales\s*funnel/i.test(getText(x)));
+    const res = {};
+    if (!card) return res;
+
+    const labels = ["Customers","Contacted","Appts Set","Appts Shown","Sold"];
+    for (const lbl of labels) {
+      const box = Array.from(card.querySelectorAll("*")).find(n => getText(n).trim() === lbl);
+      if (!box) continue;
+      // look left for number (VIN’s markup puts a big number in a sibling/ancestor)
+      const candidate = box.closest("div")?.querySelector(":scope > div, :scope ~ div");
+      const val = candidate ? numberFrom(candidate) : numberFrom(box.parentElement);
+      if (typeof val === "number") res[lbl] = val;
+    }
+    return res;
+  }
+
+  function scrapeKpis() {
+    // Card titled "Key Performance Indicators"
+    const card = Array.from(document.querySelectorAll("div,section"))
+      .find(x => /key\s*performance\s*indicators/i.test(getText(x)));
+    const out = {};
+    if (!card) return out;
+    const labels = ["Unanswered Comms","Open Visits","Buying Signals","Pending Deals"];
+    for (const lbl of labels) {
+      const el = Array.from(card.querySelectorAll("*")).find(n => getText(n).trim().startsWith(lbl));
+      if (!el) continue;
+      out[lbl] = numberFrom(el);
+    }
+    return out;
+  }
+
+  function scrapeDailyActivity() {
+    const panel = Array.from(document.querySelectorAll("div,section"))
+      .find(x => /daily\s*activity/i.test(getText(x)));
+    const sections = ["Calls", "Emails", "Texts", "Visits", "Deals"];
+    const out = {};
+    if (!panel) return out;
+
+    for (const secName of sections) {
+      const sec = Array.from(panel.querySelectorAll("div,section"))
+        .find(s => s.querySelector("h2,h3,header,[role=heading]")?.textContent?.trim() === secName);
+      if (!sec) continue;
+
+      const metrics = {};
+      Array.from(sec.querySelectorAll("div,li,span")).forEach(el => {
+        const m = getText(el).match(/^([A-Za-z/ ]+)\s+(\d+)$/);
+        if (m) metrics[m[1].trim()] = parseInt(m[2], 10);
+      });
+      if (Object.keys(metrics).length) out[secName] = metrics;
+    }
+    return out;
+  }
+
+  function scrapeAppointments() {
+    // Find a region containing "Appointments" with a table/grid inside
+    const region = Array.from(document.querySelectorAll("div,section"))
+      .find(x => /appointments/i.test(getText(x)) && x.querySelector("table, [role=grid]"));
+    if (!region) return [];
+    const rows = [];
+    const tb = region.querySelector("tbody") || region;
+    Array.from(tb.querySelectorAll("tr")).forEach(tr => {
+      const cells = Array.from(tr.querySelectorAll("td")).map(td => getText(td));
+      if (cells.length >= 4) {
+        rows.push({
+          time:      cells[0],
+          rep:       cells[1],
+          customer:  cells[2], // redact if desired
+          vehicle:   cells[3],
+          confirmed: cells[4] || null
+        });
+      }
+    });
+    return rows;
+  }
+
+  function scrapeIRT() {
+    const card = Array.from(document.querySelectorAll("div,section"))
+      .find(x => /internet\s*response\s*times/i.test(getText(x)));
+    const out = {};
+    if (!card) return out;
+    const total = getText(card).match(/Total\s*Leads\s*(\d+)/i);
+    if (total) out.totalLeads = parseInt(total[1], 10);
+    return out;
+  }
+
+  function scrapeUser() {
+    // top-right user name usually present
+    const el = document.querySelector('a[href*="profile"], [class*="user"], [class*="UserName"]');
+    return getText(el) || null;
+  }
+
+  function buildPayload() {
+    return {
+      ts: new Date().toISOString(),
+      page: "dealer-dashboard",
+      url: location.href,
+      dealer: getDealer(),
+      dateRange: getDateRange(),
+      salesFunnel: scrapeSalesFunnel(),
+      kpis: scrapeKpis(),
+      dailyActivity: scrapeDailyActivity(),
+      appointments: scrapeAppointments(),
+      responseTimes: scrapeIRT(),
+      user: scrapeUser()
+    };
+  }
+
+  async function postToLocal(payload) {
+    try {
+      const r = await fetch("http://127.0.0.1:8765/dashboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      console.log("[Quirk Sidecar] Sent dashboard:", r.status);
+    } catch (e) {
+      console.warn("[Quirk Sidecar] Local API not reachable:", e.message);
+    }
+  }
+
+  // Expose handler for Alt+Q or context menu
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === "quirk:scrape-dashboard") {
+      const data = buildPayload();
+      localStorage.setItem("quirk:dashboard:last", JSON.stringify(data));
+      console.log("[Quirk Sidecar] Dashboard payload", data);
+      postToLocal(data);
+      sendResponse({ ok: true, data });
+    }
+  });
+
+  // Optional: auto-scrape once shortly after load
+  setTimeout(() => {
+    const data = buildPayload();
+    localStorage.setItem("quirk:dashboard:last", JSON.stringify(data));
+    postToLocal(data);
+  }, 5000);
+})();
