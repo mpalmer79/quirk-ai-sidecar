@@ -29,3 +29,25 @@ def summarize(lead: Lead):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="127.0.0.1", port=8765, reload=True)
+from typing import Dict, List, Optional
+from pydantic import BaseModel
+
+class DashboardPayload(BaseModel):
+    ts: str
+    page: str
+    url: str
+    dealer: Dict[str, Optional[str]]
+    dateRange: Dict[str, Optional[str]]
+    salesFunnel: Dict[str, Optional[int]] = {}
+    kpis: Dict[str, Optional[int]] = {}
+    dailyActivity: Dict[str, Dict[str, Optional[int]]] = {}
+    appointments: List[Dict[str, Optional[str]]] = []
+    responseTimes: Dict[str, Optional[int]] = {}
+    user: Optional[str] = None
+
+@app.post("/dashboard")
+def ingest_dashboard(data: DashboardPayload):
+    print(f"[API] Dashboard from {data.dealer} range {data.dateRange}")
+    # TODO: write to CSV, SQLite, or a file per dealer
+    # with open("dashboard_log.jsonl","a",encoding="utf-8") as f: f.write(data.model_dump_json() + "\n")
+    return {"status": "ok"}
